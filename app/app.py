@@ -1351,7 +1351,7 @@ async def api_daily_run(request: Request):
 BATCH_SIZE = 25           # 每批最多发布篇数（60s/篇下 25 篇≈27分钟，速率仍远低于触发阈值）
 POST_INTERVAL_SEC = 60    # 批内两篇提交之间的间隔（秒）——≈1 次/分钟，这是安全底线，不要调快
 CATCHUP_UNTIL_HOUR = 20   # 定时窗口错过后的补跑截止小时（晚于该点不再补跑，避免深夜发文）
-BATCH_GAP_MIN = 15        # 批间休息（分钟）；仅当一天发不完时才用到（撞限后按 35/70/120 递增）
+BATCH_GAP_MIN = 30        # 批间休息（分钟，全成功批用）；失败批固定 60 分钟，封顶 60（用户要求每 30~60 分钟巡检一次）
 PLAN_KEY = "publish_plan"
 _batch_lock = threading.Lock()
 
@@ -1673,9 +1673,10 @@ def _run_daily_batch(reason: str = "每日定时"):
             plan["fail_streak"] = int(plan.get("fail_streak", 0)) + 1
         if remaining and datetime.now().hour < 23:
             fs = int(plan.get("fail_streak", 0))
-            # 实测该账号撞限后约每 30 分钟才放行 1 次：全成功批→休 60min；刚撞限→休 35min，连撞则 70/120 递增
-            gap_min = BATCH_GAP_MIN if fs < 1 else (35 if fs == 1 else (70 if fs == 2 else 120))
-            gap_min = min(gap_min, 180)
+            # 用户要求每 30~60 分钟巡检一次直到当天全部发布成功：
+            # 全成功批→休 BATCH_GAP_MIN(30) 分钟（多于 25 篇需分批时也安全）；失败批→休 60 分钟，封顶 60，避免深夜前无限拖延
+            gap_min = BATCH_GAP_MIN if fs < 1 else 60
+            gap_min = min(gap_min, 60)
             plan["next_ts"] = int(time.time()) + gap_min * 60
         else:
             plan["next_ts"] = 0
