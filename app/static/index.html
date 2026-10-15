@@ -152,7 +152,7 @@ button { line-height: 1.2; }
     <!-- 主题多选（勾选一个或多个，每个按"每主题篇数"各生成） -->
     <div>
       <div class="flex items-center justify-between mb-0.5">
-        <span class="field-label mb-0">选择主题（可多选，也可加自定义主题）</span>
+        <span class="field-label mb-0"><span id="topic-scope-hint" class="font-normal text-slate-400"></span>选择主题（可多选，也可加自定义主题）</span>
         <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
       </div>
       <div id="topic-list" class="flex flex-wrap gap-1"></div>
@@ -347,11 +347,13 @@ button { line-height: 1.2; }
         <input id="topic_name" type="text" class="field-input" placeholder="如：鼻炎、便秘、肩颈酸痛…" />
         <label>备注 / 默认写作角度（可选）</label>
         <input id="topic_desc" type="text" class="field-input" placeholder="如：反复发作，用木梳头部按摩缓解（可留空）" />
+        <label>归属产品 <span class="text-slate-400 font-normal">— 绑定后该主题「只在该产品下出现」；选「通用」则所有产品都能用</span></label>
+        <select id="topic_product" class="field-input"></select>
         <div class="flex justify-end gap-2 mt-2">
           <button id="topic-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加主题</button>
         </div>
       </div>
-      <div class="hint">已有主题（可点删除）：</div>
+      <div class="hint">已有主题（按归属产品区分；可点编辑改归属）：</div>
       <div id="topic-list-mgr" class="space-y-2 max-h-56 overflow-auto"></div>
     </div>
   </div>
@@ -1333,7 +1335,8 @@ $('#run-form').addEventListener('submit', async (e) => {
 let PRODUCTS = [];      // [{id,name,intro,style}]
 let ACCOUNTS = [];      // [{id,name,appid,secret,author}]
 // ================= 主题库 =================
-let TOPICS = [];        // [{id,name,desc}]
+let TOPICS = [];        // [{id,name,desc,product_id}] —— 当前产品可见（专属 + 通用）
+let ALL_TOPICS = [];    // 全部主题（主题库管理页用，不受产品过滤，便于改归属）
 let SEL_TOPICS = new Set();          // 已勾选的库主题 id
 let TMP_TOPICS = [];                 // 临时自定义主题名（不入库）
 
@@ -1341,6 +1344,8 @@ function renderTopicSel() {
   const el = $('#topic-list');
   const pc = parseInt($('#count').value)||1;
   $('#topic-sel-hint').textContent = `共 ${SEL_TOPICS.size + TMP_TOPICS.length} 个主题 × ${pc} 篇 = ${(SEL_TOPICS.size+TMP_TOPICS.length)*pc} 篇`;
+  const _p = (PRODUCTS||[]).find(x => x.id === (parseInt($('#product_id').value)||0));
+  $('#topic-scope-hint').textContent = _p ? `【${_p.name}】专属 + 通用：` : '';
   let html = TOPICS.map(t => {
     const on = SEL_TOPICS.has(t.id);
     return `<label class="inline-flex items-center gap-1 px-1.5 py-[1px] rounded border cursor-pointer select-none text-[11px] leading-4 ${on?'border-blue-500 bg-blue-50 text-blue-700':'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}">
@@ -1375,18 +1380,32 @@ function renderTopicSel() {
   });
 }
 
-async function loadTopics() {
-  try { TOPICS = await (await fetch('/api/topics')).json(); } catch(e){ TOPICS=[]; }
+// ⚠️ 主题与产品绑定：只拉【当前产品专属 + 通用】的主题 —— 选「百秘一梳」就不会出现美食类主题（2026-10-16）
+let _loadTopicsSeq = 0;   // 请求序号：防止快速切换产品时，先发的旧请求后返回把新结果覆盖掉
+async function loadTopics(resetSel) {
+  // 确保产品列表就绪（启动时 loadProducts() 是异步的，否则 #product_id 还空着 → pid=0 拉不到专属主题）
+  if (!PRODUCTS.length) { try { await loadProducts(); } catch(e){} }
+  const pid = parseInt($('#product_id').value) || 0;
+  const url = '/api/topics' + (pid ? ('?product_id=' + pid) : '');
+  const seq = ++_loadTopicsSeq;
+  let data = [];
+  try { data = await (await fetch(url)).json(); } catch(e){ data = []; }
+  if (seq !== _loadTopicsSeq) return;   // 期间已发起更新的请求 → 丢弃本次结果（防并发覆盖）
+  TOPICS = data;
   const ids = new Set(TOPICS.map(t=>t.id));
-  if (!window._topicInitDone) {
-    // 首次进入：默认勾选【所有主题】；若此前手动调整过选择（localStorage）则沿用
+  if (resetSel) {
+    // 切换产品：可见主题集合已变，旧产品的勾选无意义 → 默认全选该产品（+通用）的主题
+    window._topicInitDone = true;
+    SEL_TOPICS = new Set(TOPICS.map(t=>t.id));
+  } else if (!window._topicInitDone) {
+    // 首次进入：默认勾选全部；若该产品此前手动调整过选择（localStorage，按产品分开存）则沿用
     window._topicInitDone = true;
     let savedSel = null;
-    try { savedSel = JSON.parse(localStorage.getItem('sel_topics_v1') || 'null'); } catch(_) {}
+    try { savedSel = JSON.parse(localStorage.getItem(selTopicsKey()) || 'null'); } catch(_) {}
     if (Array.isArray(savedSel)) {
       SEL_TOPICS = new Set(savedSel.map(x=>parseInt(x)).filter(id => ids.has(id)));
     } else {
-      TOPICS.forEach(t => SEL_TOPICS.add(t.id));   // 默认全选所有主题
+      TOPICS.forEach(t => SEL_TOPICS.add(t.id));   // 默认全选该产品可见主题
     }
   } else {
     // 保留仍存在的已选 id
@@ -1394,57 +1413,94 @@ async function loadTopics() {
   }
   saveSelTopics();
   renderTopicSel();
-  renderTopicMgr();
 }
+// 选择记忆按产品分开存（切换产品互不干扰）
+function selTopicsKey() { return 'sel_topics_v2_' + (parseInt($('#product_id').value) || 0); }
 function saveSelTopics() {
-  try { localStorage.setItem('sel_topics_v1', JSON.stringify([...SEL_TOPICS])); } catch(_) {}
+  try { localStorage.setItem(selTopicsKey(), JSON.stringify([...SEL_TOPICS])); } catch(_) {}
 }
 
+function prodName(pid) {
+  if (!pid) return '通用';
+  const p = (PRODUCTS || []).find(x => x.id === pid);
+  return p ? p.name : ('#' + pid);
+}
+function fillProductSelect(sel, selected) {
+  if (!sel) return;
+  sel.innerHTML = `<option value="0">通用（所有产品都能用）</option>`
+    + (PRODUCTS || []).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  const want = String(selected || 0);
+  if ([...sel.options].some(o => o.value === want)) sel.value = want;
+}
+// 主题库管理页：加载【全部】主题（不受当前产品过滤，方便逐个改归属）
+async function openTopicMgr() {
+  $('#topic-modal').classList.remove('hidden');
+  if (!PRODUCTS.length) { try { await loadProducts(); } catch(e){} }
+  try { ALL_TOPICS = await (await fetch('/api/topics')).json(); } catch(e) { ALL_TOPICS = []; }
+  fillProductSelect($('#topic_product'), 0);
+  renderTopicMgr();
+}
 function renderTopicMgr() {
   const el = $('#topic-list-mgr');
-  if (!TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; return; }
-  el.innerHTML = TOPICS.map(t => `<div id="row-topic-${t.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
-    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(t.name)}</div>
+  if (!ALL_TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; return; }
+  el.innerHTML = ALL_TOPICS.map(t => {
+    const badge = t.product_id
+      ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-blue-50 text-blue-700 border border-blue-200">${esc(prodName(t.product_id))}</span>`
+      : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">通用</span>`;
+    return `<div id="row-topic-${t.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(t.name)}${badge}</div>
       <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
     <div class="flex-shrink-0 flex items-center gap-1 ml-2">
       <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
       <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>
     </div>
-  </div>`).join('');
+  </div>`;
+  }).join('');
 }
 function editTopicRow(id) {
-  const t = TOPICS.find(x => x.id === id); if (!t) return;
+  const t = ALL_TOPICS.find(x => x.id === id); if (!t) return;
   const row = document.getElementById('row-topic-' + id);
   if (!row) return;
   row.innerHTML = `<div class="flex-1 min-w-0 space-y-1.5">
       <input id="etn-${id}" class="field-input w-full text-sm" value="${esc(t.name)}" placeholder="主题名" />
       <input id="etd-${id}" class="field-input w-full text-xs" value="${esc(t.desc || '')}" placeholder="备注（可选）" />
+      <select id="etp-${id}" class="field-input w-full text-xs"></select>
     </div>
     <div class="flex-shrink-0 flex items-center gap-2 ml-2">
       <button class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700" onclick="saveTopicRow(${id})">保存</button>
-      <button class="text-xs bg-slate-200 text-slate-700 px-2.5 py-1 rounded hover:bg-slate-300" onclick="loadTopics()">取消</button>
+      <button class="text-xs bg-slate-200 text-slate-700 px-2.5 py-1 rounded hover:bg-slate-300" onclick="openTopicMgr()">取消</button>
     </div>`;
+  fillProductSelect(document.getElementById('etp-' + id), t.product_id);
 }
 async function saveTopicRow(id) {
   const name = document.getElementById('etn-' + id).value.trim();
   const desc = document.getElementById('etd-' + id).value.trim();
+  const product_id = parseInt(document.getElementById('etp-' + id).value) || 0;
   if (!name) { alert('主题名不能为空'); return; }
   try {
-    await apiCall('/api/topics/' + id, { name, desc }, 'PUT');
-    loadTopics();
+    await apiCall('/api/topics/' + id, { name, desc, product_id }, 'PUT');
+    await openTopicMgr();                          // 刷新管理页（归属徽章）
+    window._topicInitDone = false; loadTopics();   // 主页面按当前产品重新拉取
   } catch(e) { alert('保存失败：' + e.message); }
 }
 async function delTopic(id) {
   if (!confirm('删除该主题？')) return;
   try { await apiCall('/api/topics/'+id, null, 'DELETE'); } catch(e){}
-  SEL_TOPICS.delete(id); loadTopics();
+  SEL_TOPICS.delete(id);
+  await openTopicMgr();
+  window._topicInitDone = false; loadTopics();
 }
-$('#topic-btn').addEventListener('click', () => { $('#topic-modal').classList.remove('hidden'); loadTopics(); });
+$('#topic-btn').addEventListener('click', openTopicMgr);
 $('#topic-add').addEventListener('click', async () => {
   const name = $('#topic_name').value.trim(), desc = $('#topic_desc').value.trim();
+  const product_id = parseInt($('#topic_product').value) || 0;
   if (!name) { alert('请输入主题词'); return; }
-  try { await apiCall('/api/topics', { name, desc }); $('#topic_name').value=''; $('#topic_desc').value=''; loadTopics(); }
-  catch(e){ alert('添加失败：'+e.message); }
+  try {
+    await apiCall('/api/topics', { name, desc, product_id });
+    $('#topic_name').value=''; $('#topic_desc').value='';
+    await openTopicMgr();
+    window._topicInitDone = false; loadTopics();
+  } catch(e){ alert('添加失败：'+e.message); }
 });
 // 临时主题加入勾选
 $('#add-topic-tmp').addEventListener('click', addTmpTopic);
@@ -1657,6 +1713,8 @@ $('#sched_enable').addEventListener('change', saveSchedule);
 $('#sched_time').addEventListener('change', saveSchedule);
 $('#account_id').addEventListener('change', saveSchedule);
 $('#product_id').addEventListener('change', saveSchedule);
+// 切换产品 → 主题按新产品重新过滤（专属 + 通用），并默认全选该产品的主题（2026-10-16）
+$('#product_id').addEventListener('change', () => loadTopics(true));
 // 每主题篇数变化 → 刷新已勾选主题的合计提示
 $('#count').addEventListener('change', () => { if ($('#topic-list')) renderTopicSel(); });
 // 恢复：若 localStorage 记了 active job，先拉一次，若已完成则清掉；未完成则显示 running 状态

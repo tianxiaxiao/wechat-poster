@@ -60,6 +60,9 @@ class Topic(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(128), nullable=False)  # 主题词，如"偏头痛"、"失眠"、"脱发"
     desc = Column(String(255), nullable=False, default="")  # 可选备注/默认角度提示
+    # 归属产品：>0 只在该产品下出现；0 = 通用（所有产品都能看到）。
+    # 用途：把「保健功效类主题」绑到木梳，就不会出现在美食产品下（2026-10-16 新增）。
+    product_id = Column(Integer, default=0, index=True)
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
 
 
@@ -166,6 +169,11 @@ def _migrate_schema():
                 c.commit()
             if "theme" not in cols2:
                 c.execute(text("ALTER TABLE articles ADD COLUMN theme VARCHAR(64) DEFAULT ''"))
+                c.commit()
+            cols3 = [r[1] for r in c.execute(text("PRAGMA table_info(topics)")).fetchall()]
+            if cols3 and "product_id" not in cols3:
+                # 旧库已有主题一律视为「通用(0)」→ 所有产品仍可见，不会突然消失
+                c.execute(text("ALTER TABLE topics ADD COLUMN product_id INTEGER DEFAULT 0"))
                 c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")

@@ -1025,11 +1025,25 @@ async def del_product_api(pid: int, request: Request):
 
 
 # ========== 主题库 CRUD ==========
+def _product_name(db, pid: int) -> str:
+    """产品 id → 名称（仅用于日志/审计文案）；0 或找不到 → 「通用（所有产品）」。"""
+    if not pid:
+        return "通用（所有产品）"
+    p = db.query(Product).filter(Product.id == pid).first()
+    return p.name if p else f"#{pid}（已删除）"
+
+
 @app.get("/api/topics")
-async def list_topics_api():
+async def list_topics_api(product_id: int = -1):
+    """主题列表。product_id ≥ 0 时只返回【该产品专属 + 通用(0)】的主题
+    —— 前端选产品后据此过滤，避免美食产品看到保健主题；不传则返回全部（主题库管理页用）。"""
     db = SessionLocal()
     try:
-        return [{"id": t.id, "name": t.name, "desc": t.desc} for t in db.query(Topic).order_by(Topic.id).all()]
+        q = db.query(Topic).order_by(Topic.id)
+        if product_id >= 0:
+            q = q.filter((Topic.product_id == product_id) | (Topic.product_id == 0))
+        return [{"id": t.id, "name": t.name, "desc": t.desc,
+                 "product_id": (t.product_id or 0)} for t in q.all()]
     finally:
         db.close()
 
@@ -1037,6 +1051,7 @@ async def list_topics_api():
 class TopicIn(BaseModel):
     name: str
     desc: str = ""
+    product_id: int = 0     # 归属产品：0=通用（所有产品可见）
 
 
 @app.post("/api/topics")
@@ -1048,10 +1063,11 @@ async def add_topic_api(t: TopicIn, request: Request):
     try:
         if db.query(Topic).filter(Topic.name == t.name.strip()).first():
             raise HTTPException(400, "主题已存在")
-        tp = Topic(name=t.name.strip(), desc=t.desc.strip())
+        pname = _product_name(db, int(t.product_id or 0))
+        tp = Topic(name=t.name.strip(), desc=t.desc.strip(), product_id=int(t.product_id or 0))
         db.add(tp); db.commit(); db.refresh(tp)
-        audit.audit(request, "topic.create", f"新增主题「{tp.name}」", user=me)
-        return {"id": tp.id, "name": tp.name}
+        audit.audit(request, "topic.create", f"新增主题「{tp.name}」（归属：{pname}）", user=me)
+        return {"id": tp.id, "name": tp.name, "product_id": tp.product_id or 0}
     finally:
         db.close()
 
@@ -1071,9 +1087,11 @@ async def edit_topic_api(tid: int, t: TopicIn, request: Request):
             raise HTTPException(400, "已有同名主题")
         tp.name = t.name.strip()
         tp.desc = t.desc.strip()
+        tp.product_id = int(t.product_id or 0)
         db.commit()
-        audit.audit(request, "topic.update", f"修改主题「{tp.name}」", user=me)
-        return {"ok": True, "id": tp.id, "name": tp.name}
+        audit.audit(request, "topic.update",
+                    f"修改主题「{tp.name}」（归属：{_product_name(db, tp.product_id)}）", user=me)
+        return {"ok": True, "id": tp.id, "name": tp.name, "product_id": tp.product_id or 0}
     finally:
         db.close()
 
@@ -1735,6 +1753,13 @@ def _item_done_for_accounts(it: dict, target_ids: list) -> bool:
     return set(int(x) for x in target_ids) <= das
 
 
+def _topic_names_for_product(topic_rows, product_id: int) -> list:
+    """按产品过滤主题名：保留【该产品专属(product_id==pid)】与【通用(0/未设置)】的主题。
+    用途：定时发布只发当前产品对应的主题 —— 保健功效类主题绑到木梳后，就不会出现在美食产品下（2026-10-16）。"""
+    pid = int(product_id or 0)
+    return [t.name for t in topic_rows if (t.product_id or 0) in (0, pid)]
+
+
 def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", schedule_product_id=0,
                      mark_daily_run=False):
     """执行一个批次：把今天的发布计划发到「用户勾选的多个公众号」（多租户）。
@@ -1763,13 +1788,10 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
         _ensure_card_render_ok("每日批次开始")   # 渲染管线自检：不可用立即告警，避免静默降级
         db = SessionLocal()
         try:
-            topics = [t.name for t in db.query(Topic).order_by(Topic.id).all()]
+            topic_rows = db.query(Topic).order_by(Topic.id).all()
             all_accounts = db.query(Account).order_by(Account.id).all()
         finally:
             db.close()
-        if not topics:
-            logger.warning("定时发布跳过：主题库为空")
-            return
 
         # ── 解析目标公众号列表（多租户：优先用传入 account_ids，否则从用户设置取）──
         target_accounts = []
@@ -1822,6 +1844,14 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                 product = db.query(Product).order_by(Product.id).first()
             finally:
                 db.close()
+
+        # ── 主题按产品过滤：只发【该产品专属 + 通用(product_id=0)】的主题 ──
+        # 把保健功效类主题绑定到木梳后，它就不会再出现在美食产品的定时发布里（2026-10-16 新增）
+        topics = _topic_names_for_product(topic_rows, product.id if product else 0)
+        if not topics:
+            logger.warning("定时发布跳过：产品「%s」下无可用主题（专属与通用均为空）",
+                           (product.name if product else "默认产品"))
+            return
 
         plan = _plan_load()
         today = datetime.now().strftime("%Y-%m-%d")
