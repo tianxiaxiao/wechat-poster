@@ -376,8 +376,8 @@ button { line-height: 1.2; }
         <button id="topic-bulk-apply" type="button" class="shrink-0 px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">应用到已选</button>
         <span id="topic-bulk-msg" class="ml-auto"></span>
       </div>
-      <div class="text-[11px] text-slate-400 mt-1.5">已有主题（勾选可批量归类；也可点「编辑」逐条改）：</div>
-      <div id="topic-list-mgr" class="space-y-2 max-h-56 overflow-auto"></div>
+      <div class="text-[11px] text-slate-400 mt-1.5">已有主题（<b class="font-semibold text-slate-500">按归属产品分组</b>，点组名可折叠；组头勾选框 = 全选本组）：</div>
+      <div id="topic-list-mgr" class="space-y-2 max-h-80 overflow-auto pr-0.5"></div>
     </div>
   </div>
 </div>
@@ -1467,25 +1467,66 @@ async function openTopicMgr(keepMsg) {
   if (!keepMsg) $('#topic-bulk-msg').textContent = '';
   renderTopicMgr();
 }
+// 主题多时按【归属产品】分组列出，每组可折叠 + 组内全选，方便查看与按组归类（2026-10-16）
 function renderTopicMgr() {
   const el = $('#topic-list-mgr');
   if (!ALL_TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; updateTopicSelCount(); return; }
-  el.innerHTML = ALL_TOPICS.map(t => {
-    const badge = t.product_id
-      ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-blue-50 text-blue-700 border border-blue-200">${esc(prodName(t.product_id))}</span>`
-      : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">通用</span>`;
-    return `<div id="row-topic-${t.id}" class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded px-3 py-2">
-    <input type="checkbox" class="topic-row-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-id="${t.id}" title="勾选后可批量归类" />
-    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(t.name)}${badge}</div>
-      <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
-    <div class="flex-shrink-0 flex items-center gap-1 ml-2">
-      <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
-      <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>
-    </div>
-  </div>`;
+
+  // 分组：通用(0) 排最前，其余按产品 id；空组不显示
+  const groups = new Map();
+  ALL_TOPICS.forEach(t => {
+    const pid = t.product_id || 0;
+    if (!groups.has(pid)) groups.set(pid, []);
+    groups.get(pid).push(t);
+  });
+  const pids = [...groups.keys()].sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : a - b));
+
+  el.innerHTML = pids.map(pid => {
+    const items = groups.get(pid);
+    const gname = pid ? prodName(pid) : '通用（不限产品）';
+    const rows = items.map(t => {
+      const badge = t.product_id
+        ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-blue-50 text-blue-700 border border-blue-200">${esc(prodName(t.product_id))}</span>`
+        : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">通用</span>`;
+      return `<div id="row-topic-${t.id}" class="flex items-center gap-2 bg-white border border-slate-200 rounded px-2.5 py-1.5">
+      <input type="checkbox" class="topic-row-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-id="${t.id}" data-pid="${pid}" title="勾选后可批量归类" />
+      <div class="flex-1 min-w-0"><div class="text-sm font-medium truncate">${esc(t.name)}${badge}</div>
+        <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
+      <div class="flex-shrink-0 flex items-center gap-1 ml-2">
+        <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
+        <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>
+      </div>
+    </div>`;
+    }).join('');
+    return `<div data-group="${pid}">
+      <div class="group-head flex items-center gap-1.5 px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded cursor-pointer select-none">
+        <span class="group-caret text-slate-400 text-[10px] w-2.5">▾</span>
+        <input type="checkbox" class="group-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-pid="${pid}" title="全选本组" />
+        <span class="text-xs font-semibold text-slate-700">${esc(gname)}</span>
+        <span class="text-[11px] text-slate-400">（${items.length}）</span>
+      </div>
+      <div class="group-body space-y-1 mt-1">${rows}</div>
+    </div>`;
   }).join('');
-  // 重新渲染后勾选归零 → 同步计数与「全选」
+
+  // 行勾选 → 同步计数
   el.querySelectorAll('.topic-row-cb').forEach(cb => cb.addEventListener('change', updateTopicSelCount));
+  // 组头点击 → 折叠/展开（点勾选框不折叠）
+  el.querySelectorAll('[data-group] .group-head').forEach(head => {
+    head.addEventListener('click', (e) => {
+      if (e.target.classList.contains('group-cb')) return;
+      const g = head.closest('[data-group]');
+      const body = g.querySelector('.group-body');
+      const hidden = body.classList.toggle('hidden');
+      g.querySelector('.group-caret').textContent = hidden ? '▸' : '▾';
+    });
+  });
+  // 组内全选
+  el.querySelectorAll('.group-cb').forEach(gcb => gcb.addEventListener('change', () => {
+    el.querySelectorAll(`.topic-row-cb[data-pid="${gcb.dataset.pid}"]`)
+      .forEach(cb => { cb.checked = gcb.checked; });
+    updateTopicSelCount();
+  }));
   const all = $('#topic-sel-all');
   if (all) { all.checked = false; all.indeterminate = false; }
   updateTopicSelCount();
@@ -1501,6 +1542,15 @@ function updateTopicSelCount() {
   if (cnt) cnt.textContent = `已选 ${ids.length} 条`;
   const all = $('#topic-sel-all');
   if (all) { all.checked = total > 0 && ids.length === total; all.indeterminate = ids.length > 0 && ids.length < total; }
+  // 同步各组头部的「本组全选」勾选框状态
+  document.querySelectorAll('#topic-list-mgr [data-group]').forEach(g => {
+    const cbs = [...g.querySelectorAll('.topic-row-cb')];
+    const gcb = g.querySelector('.group-cb');
+    if (!gcb || !cbs.length) return;
+    const on = cbs.filter(c => c.checked).length;
+    gcb.checked = on === cbs.length;
+    gcb.indeterminate = on > 0 && on < cbs.length;
+  });
 }
 function editTopicRow(id) {
   const t = ALL_TOPICS.find(x => x.id === id); if (!t) return;

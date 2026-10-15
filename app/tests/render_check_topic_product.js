@@ -171,6 +171,41 @@ async function login(page, user, pw) {
           `w=${layout.nameW} h=${layout.nameH}`);
     check("批量操作条单行排布（≤44px）", layout.barH > 0 && layout.barH <= 44, `${layout.barH}px`);
 
+    // ---- 按归属产品分组 + 折叠 + 组内全选 ----
+    console.log("\n[D3] 主题按归属产品分组列出");
+    const groups = await page.$$eval("#topic-list-mgr [data-group]", gs => gs.map(g => ({
+      pid: g.dataset.group,
+      name: (g.querySelector(".group-head .font-semibold") || {}).textContent?.trim() || "",
+      cnt: g.querySelectorAll(".topic-row-cb").length,
+      head: (g.querySelector(".group-head") || {}).textContent?.replace(/\s+/g, " ").trim() || "",
+    })));
+    check("存在多个分组（通用 + 各产品）", groups.length >= 3,
+          groups.map(g => `${g.name}:${g.cnt}`).join(" / "));
+    check("「通用」组排在最前", groups[0] && groups[0].name.includes("通用"), groups[0] && groups[0].name);
+    check("组标题带条数", groups.every(g => /（\d+）/.test(g.head)), groups[0] && groups[0].head);
+    const sumCnt = groups.reduce((s, g) => s + g.cnt, 0);
+    const allRows = await page.$$eval("#topic-list-mgr .topic-row-cb", els => els.length);
+    check("各分组条数之和 = 全部主题数", sumCnt === allRows, `${sumCnt}/${allRows}`);
+
+    const g2 = groups[1];
+    await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-head`, el => el.click());
+    await page.waitForTimeout(300);
+    check("点组头可折叠该组",
+          await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-body`, el => el.classList.contains("hidden")));
+    check("折叠后箭头变 ▸",
+          (await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-caret`, el => el.textContent.trim())) === "▸");
+    await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-head`, el => el.click());
+    await page.waitForTimeout(300);
+    check("再点一次可展开",
+          await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-body`, el => !el.classList.contains("hidden")));
+
+    await page.$eval(`#topic-list-mgr [data-group="${g2.pid}"] .group-cb`, el => el.click());
+    await page.waitForTimeout(300);
+    const gChecked = await page.$$eval(`#topic-list-mgr [data-group="${g2.pid}"] .topic-row-cb:checked`, els => els.length);
+    check("组头勾选框 = 全选本组", gChecked === g2.cnt, `${gChecked}/${g2.cnt}`);
+    const topCnt = await page.$eval("#topic-sel-count", el => el.textContent || "");
+    check("顶部计数同步更新", topCnt.includes(`已选 ${g2.cnt} 条`), topCnt);
+
     // ---- 批量归类（勾选多条 → 一次改归属） ----
     console.log("\n[E] 主题库管理页：批量归类");
     // ⚠️ 弹层在 [D] 阶段已打开：先关闭再重开，保证干净状态（否则点击会被遮罩拦截）
