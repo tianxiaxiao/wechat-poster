@@ -11,9 +11,19 @@ import os
 import json
 import logging
 from typing import List, Dict, Optional
+from urllib.parse import urlparse
 from openai import OpenAI
 
 log = logging.getLogger("poster.llm")
+
+# ---- 通用参数 ----
+# 单次 LLM 调用最长等待（秒）：超时即判失败，避免端点卡死时整批无意义干转。
+# 本地大模型（如 35B Qwen3）一次生成多篇较慢，默认给 180s；可用 LLM_TIMEOUT_SEC 覆盖。
+LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT_SEC", "180"))
+# 浏览器 UA + Origin：部分网关/Cloudflare 会拦截 curl/SDK 默认 UA（HTTP 403 error 1010），
+# 统一带浏览器头，OpenAI 兼容端点才通。
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 # ---- provider 预设 ----
 PROVIDERS = {
@@ -64,16 +74,20 @@ def _make_client(provider: str, api_key: str = "", base_url: str = "") -> OpenAI
         # Ollama 本地一般不校验 key，传 "ollama" 占位即可
         if not final_key:
             final_key = env_key or ("ollama" if provider == "ollama" else "")
-    return OpenAI(api_key=final_key or "EMPTY", base_url=final_base_url)
+    return OpenAI(api_key=final_key or "EMPTY", base_url=final_base_url,
+                  default_headers={"User-Agent": BROWSER_UA})
 
 
 def _urllib_chat(base_url: str, api_key: str, model: str, messages: list,
                  temperature: float = 0.85, max_tokens: int = 8000,
-                 extra_body: dict = None, timeout: int = 300) -> str:
+                 extra_body: dict = None, timeout: int = LLM_TIMEOUT) -> str:
     """基于 urllib 的 OpenAI 兼容 chat/completions 调用。
-    用于自建 OpenAI 兼容网关：有些网关按 User-Agent 白名单限制，
-    只放行 curl UA，需显式设置 User-Agent: curl/8.21.0 才能通过。"""
+    用于自建 OpenAI 兼容网关 / 本地 Ollama 等：
+    - 统一带浏览器 UA + Origin（部分网关/Cloudflare 会拦截 curl/SDK 默认 UA，报 403 error 1010）；
+    - 默认超时 LLM_TIMEOUT，端点卡死时快速失败而非无限等待。"""
     import urllib.request
+    o = urlparse(base_url)
+    origin = f"{o.scheme}://{o.netloc}" if o.netloc else ""
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -87,8 +101,10 @@ def _urllib_chat(base_url: str, api_key: str, model: str, messages: list,
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
-        "User-Agent": "curl/8.21.0",   # 关键：绕过该网关的 UA 白名单
+        "User-Agent": BROWSER_UA,   # 关键：绕过网关/Cloudflare 的 UA 拦截（403 error 1010）
         "Accept": "*/*",
+        "Origin": origin,
+        "Referer": origin + "/",
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         d = json.loads(resp.read().decode("utf-8"))
@@ -259,9 +275,12 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
     out: List[Dict] = []
     errors: List[str] = []
     batch_sizes = []
+    # OpenAI 兼容/本地大模型（如 llama.cpp 上的 Qwen3）单篇就很慢且输出 token 受限，
+    # 一次塞多篇既慢又易超 max_tokens 被截断 → 每批只生成 1 篇，尽量保住质量与完整 JSON。
+    max_per = 1 if provider == "openai_compat" else _MAX_PER_CALL
     remaining = max(count, 1)
     while remaining > 0:
-        n = min(_MAX_PER_CALL, remaining)
+        n = min(max_per, remaining)
         batch_sizes.append(n)
         remaining -= n
     for bi, n in enumerate(batch_sizes):
@@ -311,6 +330,7 @@ def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
         raise ValueError(f"provider={provider} 需要指定 model（如 qwen2.5:7b / llama3:8b）")
 
     client = _make_client(provider, api_key=api_key, base_url=base_url)
+    client = client.with_options(timeout=LLM_TIMEOUT)   # 兜底超时：端点无响应时不无限阻塞
     log.info("LLM 调用: provider=%s model=%s product=%s", provider, final_model, product_name or brand)
 
     if product_name:
@@ -332,15 +352,17 @@ def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
 
     if provider == "openai_compat":
         # 部分自建网关只放行 curl UA，openai SDK 默认 UA 会被 403/blocked。
-        # 且模型是 reasoning 型、~40 token/s：必须 enable_thinking:False 关闭思考 + 控制 max_tokens，
-        # 否则会一直思考不出正文且超时。
+        # 且模型多为 reasoning 型（如 llama.cpp 上的 Qwen3）：必须真正关闭思考，否则
+        # 会把 token 全耗在 reasoning_content 上、content 为空 → 解析不到 JSON。
+        # ⚠️ 关键：llama.cpp / 多数 OpenAI 兼容网关**只认 chat_template_kwargs 里的
+        # enable_thinking**（顶层 enable_thinking 经常被忽略，导致一直思考不出正文）。
         final_base = (base_url or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip() or cfg["default_base_url"]
         final_key2 = (os.getenv("OPENAI_COMPAT_API_KEY") or api_key or "EMPTY").strip()
         text = _urllib_chat(final_base, final_key2, final_model, messages,
                             temperature=0.85,
-                            max_tokens=4096,
-                            extra_body={"enable_thinking": False},
-                            timeout=420)
+                            max_tokens=6000,
+                            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                            timeout=LLM_TIMEOUT)
     else:
         resp = client.chat.completions.create(**kwargs)
         _fr = (resp.choices[0].finish_reason or "") if resp.choices else ""

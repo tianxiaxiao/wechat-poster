@@ -144,6 +144,10 @@ def _llm_wait_ready(job: dict, log_sink: list) -> bool:
     deadline = time.time() + LLM_WAIT_MAX_MIN * 60
     attempt = 0
     while True:
+        # 用户中途点「取消」→ 立即中止等待，本篇生成判失败（由调用方安全收尾）
+        if job.get("cancel"):
+            log_sink.append("  ⛔ 用户已取消（等待 LLM 恢复期间），中止等待")
+            return False
         ok, err = llm.ping(provider, api_key=job.get("api_key", ""),
                            base_url=job.get("base_url", ""), model=job.get("llm_model", ""))
         if ok:
@@ -159,7 +163,14 @@ def _llm_wait_ready(job: dict, log_sink: list) -> bool:
         wait = _LLM_RECHECK_SEC[min(attempt, len(_LLM_RECHECK_SEC) - 1)]
         attempt += 1
         log_sink.append(f"  ⏳ LLM 探活失败（{err[:100]}）→ {wait}s 后重试（第 {attempt} 轮，最长等待 {LLM_WAIT_MAX_MIN} 分钟）")
-        time.sleep(wait)
+        # 拆分 sleep 为 3s 步长并轮询 cancel，保证点「取消」后数秒内即响应（不再干转数分钟）
+        slept = 0
+        while slept < wait:
+            if job.get("cancel"):
+                log_sink.append("  ⛔ 用户已取消（等待 LLM 恢复期间），中止等待")
+                return False
+            time.sleep(min(3, wait - slept))
+            slept += 3
 
 
 def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
@@ -260,8 +271,9 @@ def _new_job(topics: list, brand: str, author: str, extra_hint: str = "",
         "extra_hint": extra_hint,
         "operator": operator or {},
         "created_at": datetime.now().isoformat(),
-        "phase": "queued",     # queued / generating / publishing_p1 / .../ done / failed
+        "phase": "queued",     # queued / generating / publishing_p1 / .../ done / failed / cancelled
         "articles": [],        # [{seq, topic, title, status, qr_url, ok, error, publish_id}]
+        "cancel": False,       # 用户在前端点「取消」后置 True，worker 在下个检查点安全收尾
         "log": [],
     }
 
@@ -283,6 +295,11 @@ def _run_job(job_id: str):
         accepted_history: list = []   # 本任务内已定稿文章 → 参与后续主题的相似度比对
         try:
             for t in job["topics"]:
+                if job.get("cancel"):
+                    gen_ok_all = False
+                    with jobs_lock:
+                        job["log"].append("⛔ 用户已取消（生成阶段），停止后续主题生成")
+                    break
                 tname, tcount = t["name"], t["count"]
                 job["log"].append(f"  生成『{tname}』{tcount} 篇…（含历史相似度去重）")
                 items = _gen_with_dedup(tname, tcount, job, job["log"],
@@ -317,6 +334,11 @@ def _run_job(job_id: str):
                 job["articles"].append({"seq": seq, "topic": "", "status": "failed", "error": str(e)})
             return
 
+        if job.get("cancel"):
+            with jobs_lock:
+                job["phase"] = "cancelled"
+                job["log"].append("⛔ 任务已取消（生成阶段），未进入发布。可在「定时/补发」里重试未完成的篇。")
+            return
         if not gen_ok_all:
             return
         job["log"].append(f"生成成功，共 {global_seq} 篇。")
@@ -334,6 +356,11 @@ def _run_job(job_id: str):
         LOGIN_APPID = os.getenv("WX_LOGIN_APPID") or os.getenv("WX_APPID", "")
         hit_limit = False   # 命中微信频率限制(53501) → 停止本轮剩余发布，避免连撞加重冷却
         for seq in range(job["count"]):
+            # 发布阶段也支持中途取消：用户点「取消」后，本篇之前已发布的保留，剩余篇不再处理
+            if job.get("cancel"):
+                with jobs_lock:
+                    job["log"].append("⛔ 用户已取消（发布阶段），剩余篇未处理（已发布的可正常保留）")
+                break
             # 手动批量发布同样要拉开间隔（实测微信要求提交间隔≥约30分钟才放行；
             # 这里至少保持 POST_INTERVAL_SEC 秒，避免密集提交触发惩罚性限流）
             if seq > 0:
@@ -474,7 +501,7 @@ def _run_job(job_id: str):
                 break
 
         with jobs_lock:
-            job["phase"] = "done"
+            job["phase"] = "cancelled" if job.get("cancel") else "done"
     except Exception as e:
         logger.exception("worker error")
         with jobs_lock:
@@ -1533,6 +1560,7 @@ def _run_daily_batch(reason: str = "每日定时"):
             "account_secret": account.secret_enc if account else "",
             "account_name": account.name if account else "默认",
             "source_label": "每日定时", "notify_on_done": True,
+            "cancel": False,
         }
         with jobs_lock:
             jobs[job_id] = job
@@ -1960,6 +1988,32 @@ async def refresh_job_links(job_id: str, request: Request, notify_again: bool = 
         except Exception as e:  # noqa: BLE001
             logger.warning("重发通知失败：%s", e)
     return {"ok": True, "published": total, "with_url": got}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, request: Request):
+    """用户手动取消正在进行的任务。仅置 cancel 标志，由 worker 在下一个安全检查点
+    安全收尾（不会中断正在写入的磁盘/DB 操作），避免直接杀线程导致数据损坏。
+    生成阶段取消：停止后续主题/篇的生成；发布阶段取消：保留已发布篇，剩余篇不再处理。"""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "job 不存在")
+        phase = job.get("phase", "")
+        if phase in ("done", "failed", "cancelled"):
+            return {"ok": False, "msg": f"任务已处于终态（{phase}），无需取消"}
+        if job.get("cancel"):
+            return {"ok": True, "msg": "已在取消中"}
+        job["cancel"] = True
+        # 取消动作本身也是对外操作，留痕（含发起人）
+        u = getattr(request.state, "user", None) or {}
+        try:
+            audit.audit(request, "job.cancel", f"取消任务（{job_id}，阶段 {phase}）",
+                        user=u, result="ok")
+        except Exception:  # noqa: BLE001
+            pass
+    logger.info("任务 %s 收到取消请求（阶段 %s）", job_id, phase)
+    return {"ok": True, "msg": "已发送取消信号，worker 将在下一个安全检查点停止（正在进行的篇/发布不会中断）"}
 
 
 def main():
