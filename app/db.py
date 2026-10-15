@@ -36,6 +36,9 @@ class UserSetting(Base):
     llm_base_url = Column(String(255), default="")           # 该用户默认 base_url
     llm_model = Column(String(255), default="")              # 该用户默认 model
     llm_api_key = Column(Text, default="")                   # 该用户自己的 API Key（各人消耗各人的）
+    # 管理员授权：允许该用户使用「共享模型设置/共享 Key」（即管理员或服务端 .env 的那套）。
+    # 默认 0 = 只能用自己填的 Key；未授权且该 provider 需要 Key 时，发布/生成会被硬拦。
+    llm_use_shared = Column(Integer, default=0)
     default_account_id = Column(Integer, default=0)          # 默认发布到的公众号
     schedule_enabled = Column(Integer, default=0)            # 该用户是否开启每日定时
     schedule_time = Column(String(8), default="10:00")       # 定时时刻 HH:MM
@@ -190,6 +193,11 @@ def _migrate_schema():
                 # 产品归属：旧数据留 NULL = 公共产品（所有人可见），不会突然消失
                 c.execute(text("ALTER TABLE products ADD COLUMN owner_id INTEGER"))
                 c.commit()
+            cols5 = [r[1] for r in c.execute(text("PRAGMA table_info(user_settings)")).fetchall()]
+            if cols5 and "llm_use_shared" not in cols5:
+                # 共享模型授权：旧数据默认 0（未授权）。管理员自己是「Key 的所有者」，不受此限。
+                c.execute(text("ALTER TABLE user_settings ADD COLUMN llm_use_shared INTEGER DEFAULT 0"))
+                c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")
 
@@ -217,6 +225,21 @@ def upsert_user_setting(user_id: int, db: Session = None, **fields) -> UserSetti
         s.commit()
         s.refresh(r)
         return r
+    finally:
+        if db is None:
+            s.close()
+
+
+def get_shared_llm_setting(db: Session = None):
+    """返回「共享模型设置」的来源 —— 最低 id 的管理员的 UserSetting（即管理员的模型设置）。
+    没有管理员或管理员没配过 → None（此时由调用方回落到服务端 .env 的默认值）。"""
+    s = db or SessionLocal()
+    try:
+        admin = (s.query(User).filter(User.role == "admin")
+                 .order_by(User.id).first())
+        if not admin:
+            return None
+        return s.get(UserSetting, admin.id)
     finally:
         if db is None:
             s.close()

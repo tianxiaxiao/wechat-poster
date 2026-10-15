@@ -150,7 +150,8 @@ def _llm_wait_ready(job: dict, log_sink: list) -> bool:
             log_sink.append("  ⛔ 用户已取消（等待 LLM 恢复期间），中止等待")
             return False
         ok, err = llm.ping(provider, api_key=job.get("api_key", ""),
-                           base_url=job.get("base_url", ""), model=job.get("llm_model", ""))
+                           base_url=job.get("base_url", ""), model=job.get("llm_model", ""),
+                           allow_env_key=bool(job.get("allow_env_key", True)))
         if ok:
             if attempt:
                 log_sink.append(f"  ✅ LLM 已恢复（共等待 {attempt} 轮），继续生成")
@@ -172,6 +173,88 @@ def _llm_wait_ready(job: dict, log_sink: list) -> bool:
                 return False
             time.sleep(min(3, wait - slept))
             slept += 3
+
+
+# ---- 按用户解析 LLM 配置（多租户 + 管理员授权）2026-10-16 ----
+# 规则（用户明确要求）：
+#   · 每位用户默认**必须用自己的 API Key**，各自消耗各自的额度；
+#   · 只有【管理员本人】或【被管理员授权 llm_use_shared=1 的用户】才允许回落到共享 Key
+#     （管理员「我的设置」里的 Key → 服务端 .env 的默认 Key）；
+#   · 未授权又没填 Key，且该 provider 需要 Key → **硬拦**（绝不静默用服务端默认 Key）；
+#   · 本地/自建模型（ollama、本机/内网地址、自己的网关域名）本来不校验 Key → 不拦。
+_GRANT_HINT = "，或让管理员在「👥 用户管理」里勾选「授权共享模型」"
+
+
+def _resolve_llm_for_user(user_id, *, provider="", base_url="", model="", api_key="",
+                          is_admin=None, db=None):
+    """返回 (cfg, err)。cfg 含 provider/base_url/model/api_key/key_source/using_shared/requires_key；
+    err 非空表示**不允许调用**（未授权且缺 Key），调用方必须拒绝并展示该提示。
+    取值优先级：请求显式传入 > 该用户自己的设置 > （被授权时）管理员共享 > provider 内置默认。"""
+    _close = False
+    if db is None:
+        db = SessionLocal(); _close = True
+    try:
+        u = db.query(User).filter(User.id == user_id).first() if user_id else None
+        if is_admin is None:
+            is_admin = bool(u and u.role == "admin")
+        us = db_api.get_user_setting(user_id, db) if user_id else None
+        share = db_api.get_shared_llm_setting(db)
+        using_shared = bool(is_admin or (us and us.llm_use_shared))
+    finally:
+        if _close:
+            db.close()
+
+    def pick(*vals):
+        for v in vals:
+            if v and str(v).strip():
+                return str(v).strip()
+        return ""
+
+    sh_prov = share.llm_provider if (using_shared and share) else ""
+    sh_base = share.llm_base_url if (using_shared and share) else ""
+    sh_model = share.llm_model if (using_shared and share) else ""
+    prov = pick(provider, us.llm_provider if us else "", sh_prov, "deepseek")
+    if prov not in llm.PROVIDERS:
+        prov = "deepseek"
+    base_url = pick(base_url, us.llm_base_url if us else "", sh_base)
+    model = pick(model, us.llm_model if us else "", sh_model)
+    if not base_url:
+        base_url = llm.PROVIDERS[prov]["default_base_url"]
+    if not model:
+        model = llm.PROVIDERS[prov]["default_model"]
+
+    requires_key = llm.requires_user_key(prov, base_url)
+    own_key = pick(api_key, us.llm_api_key if us else "")
+    shared_key = ""
+    if using_shared:
+        shared_key = (share.llm_api_key if share and share.llm_api_key else "") or llm.server_default_key(prov)
+    shared_from_admin = bool(share and share.llm_api_key)
+
+    cfg = {"provider": prov, "base_url": base_url, "model": model, "api_key": "",
+           "key_source": "", "using_shared": using_shared, "requires_key": requires_key,
+           "allow_env_key": using_shared}
+    if own_key:
+        cfg.update(api_key=own_key, key_source="你自己的 Key")
+        return cfg, ""
+    if not requires_key:
+        # 本地/自建模型通常不校验 Key：即使借用共享 Key 也只用于自家网关，且不留凭证给用户
+        if using_shared and shared_key:
+            cfg.update(api_key=shared_key,
+                       key_source="管理员共享" if shared_from_admin else "管理员共享（服务端默认）")
+        else:
+            cfg.update(key_source="不需要（本地/自建模型）")
+        return cfg, ""
+    if using_shared and shared_key:
+        cfg.update(api_key=shared_key,
+                   key_source="管理员共享" if shared_from_admin else "管理员共享（服务端默认）")
+        return cfg, ""
+    if is_admin:
+        err = (f"服务端未配置 {prov} 的默认 API Key，且你也没有填写自己的 Key —— "
+               f"请在「⚙️ AI 模型设置」里填写你自己的 Key")
+    else:
+        err = (f"未设置你自己的 API Key（当前模型来源：{prov}）—— 多用户模式下**不能使用服务端默认 Key**。"
+               f"请在「⚙️ AI 模型设置」里填写**你自己的** Key{_GRANT_HINT}")
+    return cfg, err
 
 
 def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
@@ -205,6 +288,7 @@ def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
                 product_intro=job.get("product_intro", ""),
                 product_style=job.get("product_style", ""),
                 history_titles=history_titles or None,
+                allow_env_key=bool(job.get("allow_env_key", True)),   # 未获管理员授权 → 绝不用服务端 Key
             )
             break
         except Exception as e:
@@ -241,6 +325,7 @@ def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
                 product_intro=job.get("product_intro", ""),
                 product_style=job.get("product_style", ""),
                 history_titles=history_titles or None,
+                allow_env_key=bool(job.get("allow_env_key", True)),   # 未获管理员授权 → 绝不用服务端 Key
             )
         except Exception as e:
             retry = []
@@ -808,6 +893,34 @@ class UserIn(BaseModel):
     name: str = ""
     role: str = "editor"
     is_active: int = 1
+    # 管理员授权：允许该用户使用共享模型/Key（None = 本次不改动）。普通用户自己改不了这个字段。
+    llm_use_shared: Optional[bool] = None
+
+
+def _user_llm_public(u, db) -> dict:
+    """给「用户管理」列出某个用户的模型配置概况（**绝不回显 Key 明文**，只说来源与状态）。"""
+    pub = auth.public_user(u)
+    s = db_api.get_user_setting(u.id, db)
+    use_shared = bool(s and s.llm_use_shared)
+    cfg, err = _resolve_llm_for_user(u.id, is_admin=(u.role == "admin"), db=db)
+    if err:
+        status = "missing"
+    elif cfg["key_source"] == "你自己的 Key":
+        status = "own"
+    elif cfg["using_shared"] and cfg["api_key"]:
+        status = "shared"
+    else:
+        status = "not_required"
+    pub.update({
+        "llm_use_shared": use_shared,
+        "llm_provider": (s.llm_provider if s else "") or "",
+        "llm_model": (s.llm_model if s else "") or "",
+        "has_own_key": bool(s and (s.llm_api_key or "").strip()),
+        "key_status": status,            # own / shared / missing / not_required
+        "key_source": cfg["key_source"],
+        "is_admin_user": u.role == "admin",
+    })
+    return pub
 
 
 @app.get("/api/users")
@@ -815,7 +928,7 @@ async def api_users(request: Request):
     auth.need_role(request, "admin")
     db = SessionLocal()
     try:
-        return [auth.public_user(u) for u in db.query(User).order_by(User.id).all()]
+        return [_user_llm_public(u, db) for u in db.query(User).order_by(User.id).all()]
     finally:
         db.close()
 
@@ -837,10 +950,13 @@ async def api_user_add(body: UserIn, request: Request):
         u = User(username=un, name=(body.name or "").strip() or un, role=body.role,
                  password_hash=auth.hash_password(body.password), is_active=1 if body.is_active else 0)
         db.add(u); db.commit(); db.refresh(u)
+        if body.llm_use_shared is not None:
+            db_api.upsert_user_setting(u.id, db=db, llm_use_shared=1 if body.llm_use_shared else 0)
         audit.audit(request, "user.create",
                     f"新增用户 {u.username}（{u.name}，角色 {auth.ROLES.get(u.role)}，"
-                    f"{'启用' if u.is_active else '停用'}）", user=me)
-        return {"ok": True, "user": auth.public_user(u)}
+                    f"{'启用' if u.is_active else '停用'}"
+                    + ("，已授权共享模型" if body.llm_use_shared else "") + ")", user=me)
+        return {"ok": True, "user": _user_llm_public(u, db)}
     finally:
         db.close()
 
@@ -875,10 +991,18 @@ async def api_user_update(uid: int, body: UserIn, request: Request):
             u.password_hash = auth.hash_password(body.password)
             u.must_change_pw = 0
             changes.append("重置密码")
+        # 管理员授权/取消授权：允许该用户使用共享模型（含共享 Key）。不传则不动。
+        if body.llm_use_shared is not None:
+            _us = db_api.get_user_setting(uid, db)
+            _cur = bool(_us and _us.llm_use_shared)
+            if bool(body.llm_use_shared) != _cur:
+                db_api.upsert_user_setting(uid, db=db,
+                                           llm_use_shared=1 if body.llm_use_shared else 0)
+                changes.append("授权共享模型" if body.llm_use_shared else "取消共享模型授权")
         db.commit()
         audit.audit(request, "user.update", f"修改用户 {u.username}：{'；'.join(changes) or '无变化'}",
                     user=me, level="warn" if "重置密码" in changes or "停用" in changes else "info")
-        return {"ok": True, "user": auth.public_user(u)}
+        return {"ok": True, "user": _user_llm_public(u, db)}
     finally:
         db.close()
 
@@ -1283,7 +1407,8 @@ class UserSettingsIn(BaseModel):
     llm_provider: str = "deepseek"
     llm_base_url: str = ""
     llm_model: str = ""
-    llm_api_key: str = ""          # 该用户自己的 Key（留空=用 provider 默认/服务端配置）
+    # 该用户自己的 Key。⚠️ 留空**不等于**可以用服务端默认 Key —— 只有管理员授权(use_shared)才允许（2026-10-16）
+    llm_api_key: str = ""
     default_account_id: int = 0
     schedule_enabled: bool = False
     schedule_time: str = "10:00"
@@ -1293,9 +1418,27 @@ class UserSettingsIn(BaseModel):
 
 @app.get("/api/user/settings")
 async def api_user_settings_get(request: Request):
-    """返回当前登录用户的私有设置（模型/Key + 定时）。Key 仅本人可见。"""
+    """返回当前登录用户的私有设置（模型/Key + 定时）。Key 仅本人可见。
+    另附 key_status / key_hint：让前端明确显示「你在用谁的 Key」，避免误以为能白用默认 Key。"""
     me = auth.need_login(request)
     s = db_api.get_user_setting(me["id"])
+    use_shared = bool(s and s.llm_use_shared)
+    is_admin = me["role"] == "admin"
+    cfg, err = _resolve_llm_for_user(me["id"])
+    if err:
+        key_status, key_hint = "missing", err
+    elif cfg["key_source"] == "你自己的 Key":
+        key_status, key_hint = "own", "当前使用：你自己填写的 API Key（各人消耗各自的额度）"
+    elif cfg["using_shared"] and cfg["api_key"]:
+        key_status = "shared"
+        if is_admin:
+            key_hint = ("当前使用：服务端默认 Key（你是管理员，即该 Key 的所有者；"
+                        "要在上面填自己的 Key 也可以，填了就优先用你自己的）")
+        else:
+            key_hint = ("当前使用：管理员共享的模型/Key（由管理员授权，"
+                        + ("取自管理员的设置" if "服务端默认" not in cfg["key_source"] else "取自服务端默认配置") + "）")
+    else:
+        key_status, key_hint = "not_required", "当前模型为本地/自建服务，通常不需要 API Key"
     return {
         "llm_provider": s.llm_provider if s else "deepseek",
         "llm_base_url": s.llm_base_url if s else "",
@@ -1306,6 +1449,14 @@ async def api_user_settings_get(request: Request):
         "schedule_time": s.schedule_time if s else "10:00",
         "schedule_account_ids": (json.loads(s.schedule_account_ids) if s and s.schedule_account_ids else []) if s else [],
         "schedule_product_id": s.schedule_product_id if s else 0,
+        # 新增：Key 归属/授权状态（前端据此提示）
+        "use_shared": use_shared,
+        "can_use_shared": is_admin,        # 管理员本身即 Key 所有者，无需"授权"
+        "key_status": key_status,          # own / shared / missing / not_required
+        "key_hint": key_hint,
+        "key_source": cfg["key_source"],
+        "requires_key": cfg["requires_key"],
+        "provider": cfg["provider"],
     }
 
 
@@ -1329,6 +1480,7 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
         bad = [x for x in aids if x not in owned]
         if bad:
             raise HTTPException(400, f"以下公众号不属于你或无权限：{bad}")
+        # ⚠️ llm_use_shared 只能由管理员在「用户管理」里授予，用户自己保存设置时**不允许**改动它
         db_api.upsert_user_setting(
             me["id"], db=db,
             llm_provider=body.llm_provider, llm_base_url=(body.llm_base_url or "").strip(),
@@ -1341,8 +1493,14 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
         )
     finally:
         db.close()
-    audit.audit(request, "settings.user", "更新个人设置（模型/Key/定时）", user=me)
-    return {"ok": True}
+    # 保存后立刻评估「这套配置能不能真的跑」——不能跑就给前端一条明确警告（发布时同样会被拦）
+    _cfg, _err = _resolve_llm_for_user(me["id"])
+    audit.audit(request, "settings.user",
+                f"更新个人设置（模型/Key/定时）：{body.llm_provider}"
+                + ("；⚠️ 缺 Key，发布将被拦" if _err else ""), user=me,
+                level="warn" if _err else "info")
+    return {"ok": True, "warning": _err or "", "key_status": ("missing" if _err else "ok"),
+            "key_source": _cfg["key_source"], "requires_key": _cfg["requires_key"]}
 
 
 class LlmTestIn(BaseModel):
@@ -1358,8 +1516,10 @@ async def api_llm_test(body: LlmTestIn, request: Request):
     """测试大模型连通性（同步、短超时，供设置页按钮即时反馈）。
 
     · 只做一次最小请求（max_tokens=8 的 "ping"），不会真正生成文章、不计费多少；
-    · 未填写的字段按「表单 → 该用户已保存 → 服务端环境变量」优先级解析，
+    · 未填写的字段按「表单 → 该用户已保存 → 服务端默认」优先级解析，
       与真正生成时用的配置一致（并在返回里告知 Key 的实际来源）；
+    · ⚠️ 与发布走**同一套多租户 Key 策略**：未获管理员授权又没填自己的 Key → 直接给明确原因，
+      不会偷偷拿服务端默认 Key 去测（否则用户会以为"能测通就能发"）；
     · 返回 ok / 耗时 / 实际模型与地址 / 可读错误提示，方便用户当场定位问题。
     """
     me = auth.need_login(request)
@@ -1371,14 +1531,21 @@ async def api_llm_test(body: LlmTestIn, request: Request):
     model = (body.model or (saved.llm_model if saved else "") or "").strip()
     api_key = (body.api_key or (saved.llm_api_key if saved else "") or "").strip()
 
-    info = llm.describe_config(prov, api_key=api_key, base_url=base_url, model=model)
-    if info["needs_api_key"] and not info["has_key"]:
-        return {"ok": False, "elapsed_ms": 0, "hint": "未设置 API Key：请在上面填入你的 Key（或让服务端配置好环境变量）",
-                "error": "", **info}
+    # 先用同一套策略解析（显式传入的 key 视为"他自己的"，可直接测）
+    cfg, perr = _resolve_llm_for_user(me["id"], provider=prov, base_url=base_url,
+                                      model=model, api_key=api_key)
+    info = llm.describe_config(cfg["provider"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+                               model=cfg["model"], key_origin=cfg["key_source"],
+                               allow_env_key=cfg["allow_env_key"])
+    if perr:
+        return {"ok": False, "elapsed_ms": 0, "hint": perr, "error": "",
+                "blocked": True, **info}
+    prov, api_key, base_url, model = cfg["provider"], cfg["api_key"], cfg["base_url"], cfg["model"]
 
     t0 = time.time()
     try:
-        ok, err = llm.ping(prov, api_key=api_key, base_url=base_url, model=model, timeout=20)
+        ok, err = llm.ping(prov, api_key=api_key, base_url=base_url, model=model, timeout=20,
+                           allow_env_key=cfg["allow_env_key"])
     except Exception as e:  # noqa: BLE001 —— ping 内部已兜异常，这里只防御未知情况
         ok, err = False, str(e)[:200]
     ms = int((time.time() - t0) * 1000)
@@ -1445,6 +1612,9 @@ async def api_admin_user_schedules(request: Request):
                 "llm_provider": (s.llm_provider if s else "") or "",
                 "llm_model": (s.llm_model if s else "") or "",
                 "has_own_key": bool(s.llm_api_key) if s else False,
+                # Key 策略：能否用共享模型/Key + 当前状态（定时总览里一眼看出谁没 Key 会发不出）
+                "llm_use_shared": bool(s.llm_use_shared) if s else False,
+                "key_status": _user_llm_public(u, db)["key_status"],
             })
         return {
             "users": out,
@@ -1530,22 +1700,17 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
         raise HTTPException(400, f"provider 必须是 {list(llm.PROVIDERS)} 之一")
 
     db = SessionLocal()
-    # 每用户默认 LLM（多租户：各人用各人的模型/Key）。优先级：请求显式传 > 用户默认设置 > provider 内置默认
-    us = db_api.get_user_setting(operator["id"]) if operator else None
-    api_key = req.api_key
-    model = req.model
-    base_url = req.base_url
-    if us:
-        if not api_key:
-            api_key = us.llm_api_key or ""
-        if not model:
-            model = us.llm_model or ""
-        if not base_url:
-            base_url = us.llm_base_url or ""
-    if not model:
-        model = llm.PROVIDERS[req.provider]["default_model"]
-    if not base_url:
-        base_url = llm.PROVIDERS[req.provider]["default_base_url"]
+    # 每用户默认 LLM（多租户：各人用各人的模型/Key）。
+    # ⚠️ 未获管理员授权(llm_use_shared)的用户，缺 Key 时**直接拒绝**，绝不静默用服务端默认 Key。
+    llm_cfg, llm_err = _resolve_llm_for_user(
+        operator["id"] if operator else 0, db=db,
+        provider=req.provider, base_url=req.base_url, model=req.model, api_key=req.api_key)
+    if llm_err:
+        db.close()
+        raise HTTPException(400, llm_err)
+    api_key = llm_cfg["api_key"]
+    model = llm_cfg["model"]
+    base_url = llm_cfg["base_url"]
 
     product_name, product_intro, product_style = "", "", ""
     if req.product_id:
@@ -1575,6 +1740,8 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     job["api_key"] = api_key
     job["llm_model"] = model
     job["base_url"] = base_url
+    job["allow_env_key"] = bool(llm_cfg["using_shared"])   # 未获授权 → 不许回落到服务端 .env 的 Key
+    job["key_source"] = llm_cfg["key_source"]
     job["use_api"] = bool(req.use_api)
     job["product_name"] = product_name
     job["product_intro"] = product_intro
@@ -1976,18 +2143,62 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             return
         target_ids = [a.id for a in target_accounts]
 
-        # ── 解析该用户的 LLM 配置（各人消耗各人的 Key）──
-        us = db_api.get_user_setting(user_id) if user_id else None
-        if not us and target_accounts:
-            us = db_api.get_user_setting(target_accounts[0].owner_id) if target_accounts[0].owner_id else None
-        prov = (us.llm_provider if us and us.llm_provider else "deepseek")
-        api_key = (us.llm_api_key or "") if us else ""
-        model = (us.llm_model or "") if us else ""
-        base_url = (us.llm_base_url or "") if us else ""
-        if not model:
-            model = llm.PROVIDERS[prov]["default_model"]
-        if not base_url:
-            base_url = llm.PROVIDERS[prov]["default_base_url"]
+        # ── 解析该用户的 LLM 配置（各人消耗各人的 Key + 管理员授权才可用共享 Key）──
+        # 用户 id 缺失时（旧版全局定时）回落到目标号主的设置，保持向后兼容
+        _owner_uid = user_id
+        if not _owner_uid and target_accounts:
+            _owner_uid = target_accounts[0].owner_id or 0
+        if not _owner_uid:
+            # 旧版全局定时（无人启用每用户定时）：视作服务端所有者（管理员）在跑 —— 向后兼容，
+            # 否则会因为「查不到用户」而被新策略拦下，把老的单用户部署直接搞停。
+            _db = SessionLocal()
+            try:
+                _a = _db.query(User).filter(User.role == "admin").order_by(User.id).first()
+                _owner_uid = _a.id if _a else 0
+            finally:
+                _db.close()
+        llm_cfg, llm_err = _resolve_llm_for_user(_owner_uid)
+        prov = llm_cfg["provider"]; model = llm_cfg["model"]; base_url = llm_cfg["base_url"]
+        api_key = llm_cfg["api_key"]
+        if llm_err:
+            # 硬拦：不静默用默认 Key。落一条失败任务（前端可见）+ 审计 + 企微告知，当天不再重试
+            _jid = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
+            _op = None
+            if _owner_uid:
+                _db = SessionLocal()
+                try:
+                    _u = _db.query(User).filter(User.id == _owner_uid).first()
+                    if _u:
+                        _op = {"username": _u.username, "role": _u.role}
+                finally:
+                    _db.close()
+            with jobs_lock:
+                jobs[_jid] = {
+                    "id": _jid, "topics": [], "topic": "", "total": 0, "count": 0,
+                    "brand": "", "author": "", "extra_hint": "",
+                    "created_at": datetime.now().isoformat(), "phase": "failed", "articles": [],
+                    "log": [f"[{datetime.now().isoformat()}] ⛔ {reason}：{llm_err}"],
+                    "provider": prov, "api_key": "", "llm_model": model, "base_url": base_url,
+                    "use_api": True, "product_name": "", "product_intro": "", "product_style": "",
+                    "account_appid": "", "account_secret": "",
+                    "account_name": "、".join(a.name for a in target_accounts) or "默认",
+                    "source_label": "每日定时", "notify_on_done": False,
+                    "operator": _op or {"username": "系统定时", "role": "system"},
+                    "cancel": True, "error": llm_err,
+                }
+            logger.warning("每日批次跳过（用户#%s）：%s", _owner_uid, llm_err)
+            audit.audit(None, "publish.skipped",
+                        f"每日批次（{reason}）已跳过：{llm_err}",
+                        user=_op or {"username": "系统定时", "role": "system"}, level="warn")
+            try:
+                if notify.configured():
+                    notify.send("## ⏭ 今日未发布：缺少 API Key",
+                                f"{(('用户：' + _op['username']) if _op else '')}\n\n{llm_err}\n\n"
+                                f"（修复后当天可手动补跑；未授权用户不会使用服务端默认 Key）",
+                                use_markdown=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("跳过通知失败：%s", e)
+            return
 
         # ── 产品（定时使用的产品）──
         product = None
@@ -2059,6 +2270,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             "log": [f"[{datetime.now().isoformat()}] ⏰ {reason}：第 {batch_no} 批开始（本批 {len(batch)} 篇，计划剩余 {len(pending)} 篇，目标号：{acc_names}）"
                     + ("" if notify.configured() else "｜⚠️ 未配置 ROBOT_WEBHOOK_URL，完成通知将跳过")],
             "provider": prov, "api_key": api_key, "llm_model": model, "base_url": base_url,
+            "allow_env_key": bool(llm_cfg["using_shared"]),   # 未获授权 → 不许回落到服务端 .env 的 Key
+            "key_source": llm_cfg["key_source"],
             "use_api": True,
             "product_name": product.name if product else "",
             "product_intro": product.intro if product else "",

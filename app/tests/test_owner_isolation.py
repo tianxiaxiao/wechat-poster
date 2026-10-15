@@ -206,6 +206,14 @@ def main():
         check("批量归类全是无权主题 → 403", st == 403, f"HTTP {st} {d}")
 
         print("\n[7] 发布时选用他人私有产品 → 403（且不启动任务）")
+        # 前置：先给 edA 配上自己的 API Key —— 否则会先被新的「Key 策略」拦成 400（缺 Key），
+        # 掩盖了本节要验证的「越权使用他人产品」这条（2026-10-16 新增策略后补此步骤）
+        st, d = edA.post("/api/user/settings", {
+            "llm_provider": "deepseek", "llm_base_url": "", "llm_model": "",
+            "llm_api_key": "sk-eda-own-for-isolation", "schedule_enabled": False,
+            "schedule_time": "10:00", "schedule_account_ids": [], "schedule_product_id": 0})
+        check("edA 先配上自己的 API Key（避免被 Key 策略先拦）", st == 200 and not d.get("warning"),
+              f"HTTP {st} warning={d.get('warning')!r}")
         st, d = edA.post("/api/accounts", {"name": "A号", "appid": "wx_iso_a", "secret": "sec1111111", "author": "A"})
         check("edA 建自己的公众号", st == 200, f"HTTP {st}")
         st, d = edA.get("/api/accounts")

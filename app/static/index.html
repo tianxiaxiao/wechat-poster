@@ -81,6 +81,13 @@ pre.log { background: #0f172a; color: #e2e8f0; font-size: 10px; line-height: 1.4
 .llm-fields input, .llm-fields select { width: 100%; border: 1px solid #cbd5e1; border-radius: 0.375rem; padding: 0.4rem 0.6rem; font-size: 0.85rem; font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace; background: #fff; }
 .llm-fields input:focus, .llm-fields select:focus { outline: none; border-color: #E30012; box-shadow: 0 0 0 2px rgba(227,0,18,0.15); }
 .llm-fields .hint { font-size: 0.72rem; color: #94a3b8; margin-top: 0.3rem; line-height: 1.5; }
+/* Key 归属状态提示：`.llm-fields .hint` 特异性 (0,2,0) **高于** Tailwind 的 `.text-rose-600` (0,1,0)，
+   直接用工具类会被它压掉（实测颜色仍是 slate-400）→ 这里用 ID 选择器保证状态色真的生效（2026-10-16）*/
+#key-policy-hint.st-own { color: #059669; }
+#key-policy-hint.st-shared { color: #b45309; }
+#key-policy-hint.st-missing { color: #e11d48; font-weight: 600; }
+#key-policy-hint.st-not_required { color: #94a3b8; }
+#key-policy-hint.st-dirty { color: #64748b; }
 .field-label { font-size: 0.66rem; color: #64748b; font-weight: 600; margin-bottom: 0.1rem; line-height: 1.3; }
 .field-input { width: 100%; border: 1px solid #cbd5e1; border-radius: 0.375rem; padding: 0.28rem 0.5rem; font-size: 0.82rem; }
 .field-input:focus { outline: none; border-color: #E30012; box-shadow: 0 0 0 2px rgba(227,0,18,0.15); }
@@ -262,8 +269,10 @@ button { line-height: 1.2; }
       <label>Base URL <span class="font-normal text-slate-400">— OpenAI 兼容地址</span></label>
       <input id="base_url" type="text" placeholder="https://api.deepseek.com/v1" />
 
-      <label>API Key <span class="font-normal text-slate-400">— 本地 Ollama 可留空</span></label>
-      <input id="api_key" type="password" placeholder="sk-... / 留空" autocomplete="off" />
+      <label>API Key <span class="font-normal text-slate-400">— 每位用户填自己的 Key</span></label>
+      <input id="api_key" type="password" placeholder="sk-... / 本地模型可留空" autocomplete="off" />
+      <!-- Key 归属/授权状态：说清「现在用的是谁的 Key」，避免误以为能白用默认 Key -->
+      <div id="key-policy-hint" class="hint"></div>
 
       <label>Model <span class="font-normal text-slate-400">— 模型名</span></label>
       <input id="model" type="text" placeholder="deepseek-chat / qwen2.5:7b" list="model-suggest" />
@@ -645,8 +654,16 @@ async function openUsers(){
         <button class="shrink-0 px-2.5 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700" data-act="save">保存</button>
         <button class="shrink-0 px-2.5 py-1 text-[11px] bg-rose-100 text-rose-700 rounded hover:bg-rose-200" data-act="del">删除</button>
       </div>
-      <div class="flex items-center gap-2 mt-1.5">
-        <input type="password" class="field-input" style="width:170px" data-f="password" placeholder="重置密码（留空=不改）" autocomplete="new-password" />
+      <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+        <input type="password" class="field-input shrink-0" style="width:170px" data-f="password" placeholder="重置密码（留空=不改）" autocomplete="new-password" />
+        <label class="inline-flex items-center gap-1 shrink-0 text-[11px] select-none ${u.is_admin_user?'text-slate-400':'text-slate-600 cursor-pointer'}"
+               title="${u.is_admin_user?'管理员本身就是 Key 的所有者，无需授权':'勾选后：该用户在自己没填 Key 时，可使用共享模型/Key（管理员设置 → 服务端默认）。不勾选则必须填自己的 Key。'}">
+          <input type="checkbox" class="u-shared-cb w-3.5 h-3.5 accent-blue-600 ${u.is_admin_user?'':'cursor-pointer'}"
+                 data-f="llm_use_shared" ${u.llm_use_shared?'checked':''} ${u.is_admin_user?'disabled':''} />
+          <span>授权共享模型</span>
+        </label>
+        <span class="shrink-0 text-[10px] px-1.5 py-[1px] rounded border ${keyBadgeCls(u.key_status)}"
+              title="${esc(u.key_source || '')}">${keyBadgeText(u.key_status, u.is_admin_user)}</span>
         <span class="text-[11px] text-slate-400 truncate">上次登录 ${esc(u.last_login_at || '—')}</span>
       </div>
     </div>`).join('');
@@ -656,6 +673,9 @@ async function openUsers(){
                    role: row.querySelector('[data-f=role]').value,
                    is_active: Number(row.querySelector('[data-f=is_active]').value),
                    password: row.querySelector('[data-f=password]').value };
+    // 授权共享模型：管理员行是灰的（本身即 Key 所有者），此时**不发这个字段**，避免误改
+    const cbShared = row.querySelector('[data-f=llm_use_shared]');
+    if (cbShared && !cbShared.disabled) body.llm_use_shared = !!cbShared.checked;
     const rr = await fetch('/api/users/' + uid, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const dd = await rr.json().catch(() => ({}));
     $('#nu_msg').textContent = rr.ok ? '✅ 已保存' : ('❌ ' + (dd.detail || '保存失败'));
@@ -856,32 +876,67 @@ function applyProviderToFields() {
   const p = PROVIDER_LIST.find(x => x.id === id) || {};
   const saved = loadStored();
   $('#provider-hint').textContent = PROVIDER_HINTS[id] || '';
-  if (id === 'deepseek') {
-    lockProviderFields(id);                     // 服务端固定官方地址 + .env 的 Key
-  } else {
-    $('#base_url').value = saved.base_url || p.default_base_url || '';
-    $('#api_key').value = saved.api_key || '';
-    lockProviderFields(id);                     // 解锁，允许自行填写
-  }
+  // ⚠️ 所有 provider 都要把「已保存的 Key」回填到表单：否则用户打开设置再保存，
+  //    空表单会把已保存的 Key 覆盖成空（等于清掉自己的 Key）。
+  $('#base_url').value = saved.base_url || p.default_base_url || '';
+  $('#api_key').value = saved.api_key || '';
+  lockProviderFields(id);
   $('#model').value = saved.model || p.default_model || '';
   refreshProviderTag(id);
 }
 
-// DeepSeek 用服务端固定地址与 .env Key（两个字段只读）；其他 provider 一律允许自行填写。
+// DeepSeek 的 base_url 固定为官方地址（只读）；其他 provider 一律允许自行填写。
+// ⚠️ API Key 现在**全部可编辑**：多用户模式下每位用户必须填自己的 Key，
+//    只有管理员在「用户管理」里勾选「授权共享模型」后，才允许回落到共享 Key（2026-10-16）。
 // ⚠️ 必须由**所有** provider 入口调用：打开设置、选快捷预设、直接切下拉。
-//    漏掉「直接切下拉」会导致：从 deepseek 切到本地模型后 base_url/api_key 仍被锁住、填不进去
-//    （2026-10-16 发现的真 bug，正是"经常换模型"的用法会踩到）。
 function lockProviderFields(id) {
   const deep = (id === 'deepseek');
-  if (deep) {
-    $('#base_url').value = 'https://api.deepseek.com/v1';
-    $('#api_key').value = '';
-  }
+  if (deep) $('#base_url').value = 'https://api.deepseek.com/v1';
   $('#base_url').readOnly = deep;
   $('#base_url').title = deep ? 'DeepSeek 使用官方固定地址，不可修改' : '';
-  $('#api_key').readOnly = deep;
-  $('#api_key').placeholder = deep ? '使用服务端 .env 配置，无需填写' : 'sk-... / 留空';
-  $('#api_key').title = deep ? 'DeepSeek 自动使用服务器 .env 的 DEEPSEEK_API_KEY' : '';
+  $('#api_key').readOnly = false;
+  $('#api_key').placeholder = deep ? 'sk-…（你自己的 DeepSeek Key）' : 'sk-... / 本地模型可留空';
+  $('#api_key').title = '';
+}
+
+// ============ Key 归属状态（多用户 Key 策略，2026-10-16）============
+// 原则：每位用户必须用自己的 Key；只有管理员在「用户管理」里勾选「授权共享模型」后，
+//       该用户才可回落到共享 Key（管理员设置 → 服务端默认）。状态由**服务端**判定，前端只负责显示，
+//       避免前后端各写一套判定逻辑而对不上。
+function keyBadgeCls(s) {
+  return { own: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+           shared: 'bg-amber-50 text-amber-700 border-amber-200',
+           missing: 'bg-rose-50 text-rose-700 border-rose-200',
+           not_required: 'bg-slate-100 text-slate-500 border-slate-200' }[s]
+         || 'bg-slate-100 text-slate-500 border-slate-200';
+}
+function keyBadgeText(s, isAdmin) {
+  if (isAdmin && (s === 'shared' || !s)) return '👑 管理员 · 服务端 Key';
+  return { own: '🔑 自有 Key', shared: '🔑 共享 Key（已授权）',
+           missing: '⚠️ 缺 Key（发不出）', not_required: '本地模型 · 无需 Key' }[s] || '未知状态';
+}
+function keyStatusFromSource(src) {
+  const t = String(src || '');
+  if (t.includes('你自己的')) return 'own';
+  if (t.includes('管理员共享')) return 'shared';
+  if (t.includes('不需要')) return 'not_required';
+  return 'missing';
+}
+function renderKeyPolicyHint(status, text) {
+  const el = $('#key-policy-hint');
+  if (!el) return;
+  // 状态色走 #key-policy-hint.st-* （ID 选择器），否则会被 `.llm-fields .hint` 压掉
+  el.className = 'hint st-' + (status || 'not_required');
+  el.dataset.status = status || '';
+  el.innerHTML = esc(String(text || '').replace(/\*\*/g, ''));
+}
+// 表单被改动后：明确告诉用户"还没生效 + 怎么当场验证"，而不是继续显示过期的状态
+function markKeyHintDirty() {
+  const el = $('#key-policy-hint');
+  if (!el || el.dataset.status === 'dirty') return;
+  el.className = 'hint st-dirty';
+  el.dataset.status = 'dirty';
+  el.textContent = '配置已改动：点「🔌 测试连通」可当场验证，点「保存我的设置」才会生效。';
 }
 
 function refreshProviderTag(id) {
@@ -957,6 +1012,7 @@ function applyPreset(p) {
   $('#provider-hint').textContent = PROVIDER_HINTS[p.provider] || '';
   refreshProviderTag(p.provider);
   setLlmTestStatus('idle', '');     // 换了模型来源，清掉上次的连通结果
+  markKeyHintDirty();
   toast('已载入预设：' + p.name, 2200);
 }
 $('#preset').addEventListener('change', (e) => {
@@ -1008,10 +1064,16 @@ $('#provider').addEventListener('change', () => {
   const id = $('#provider').value;
   const p = PROVIDER_LIST.find(x => x.id === id) || {};
   $('#base_url').value = p.default_base_url || '';
-  $('#api_key').value = '';
+  $('#api_key').value = '';        // 换供应商后旧 Key 已无意义，清空避免"拿 A 家的 Key 去连 B 家"
   $('#model').value = p.default_model || '';
   lockProviderFields(id);          // ★ 必须：否则从 deepseek 切过来会残留只读锁，填不了地址/Key
   setLlmTestStatus('idle', '');
+  markKeyHintDirty();
+});
+// 手动改了 Address / Key / Model → 提示"尚未生效"
+['#api_key', '#base_url', '#model'].forEach(sel => {
+  const el = $(sel);
+  if (el) el.addEventListener('input', markKeyHintDirty);
 });
 
 // ---- 测试大模型连通（按钮位于「取消」与「保存我的设置」之间）----
@@ -1038,8 +1100,16 @@ $('#settings-test').addEventListener('click', async () => {
                                              body: JSON.stringify(payload) });
     const d = await r.json().catch(()=>({}));
     if (!r.ok) { setLlmTestStatus('err', '❌ ' + (d.detail || ('请求失败 HTTP ' + r.status))); return; }
+    if (d.blocked) {
+      // 未获管理员授权又没填自己的 Key —— 这是**权限**问题，不是网络问题，明确说清
+      setLlmTestStatus('err', '⛔ ' + (d.hint || '缺少 API Key'));
+      renderKeyPolicyHint('missing', d.hint || '');
+      return;
+    }
     if (d.ok) {
       setLlmTestStatus('ok', `✅ 连通正常 · ${d.model || ''}${d.is_local ? '（本地/自建）' : ''} · ${d.elapsed_ms}ms`);
+      renderKeyPolicyHint(keyStatusFromSource(d.key_source),
+                          `✅ 连通正常，正在使用：${d.key_source || '未知'}${d.model ? '（' + d.model + '）' : ''}`);
     } else {
       const tail = d.error ? ` ｜ ${String(d.error).slice(0, 90)}` : '';
       setLlmTestStatus('err', `❌ ${d.hint || '连接失败'}${tail}`);
@@ -1071,6 +1141,8 @@ async function loadUserSettings() {
     $('#user_sched_time').value = s.schedule_time || '10:00';
     renderUserProdOptions(s.schedule_product_id);
     renderUserAcctCheckboxes(s.schedule_account_ids || []);
+    // Key 归属状态（服务端判定）：说清"现在用的是谁的 Key"
+    renderKeyPolicyHint(s.key_status, s.key_hint || '');
   } catch(e) { /* 离线/未登录时静默 */ }
 }
 function renderUserProdOptions(sel) {
@@ -1110,7 +1182,15 @@ $('#settings-save').addEventListener('click', async () => {
   };
   try {
     const r = await fetch('/api/user/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    if (!r.ok) { const d = await r.json().catch(()=>({})); toast('保存失败：' + (d.detail || r.status), 2600); return; }
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok) { toast('保存失败：' + (d.detail || r.status), 2600); return; }
+    if (d.warning) {
+      // 保存成功但"跑不起来"（通常是缺自己的 Key）→ 明说，并**不关闭**面板，方便当场补 Key
+      const w = String(d.warning).replace(/\*\*/g, '');
+      toast('⚠️ 已保存，但发布会被拦：' + w, 6000);
+      renderKeyPolicyHint(d.key_status === 'missing' ? 'missing' : keyStatusFromSource(d.key_source), w);
+      return;
+    }
     toast('✅ 已保存「我的设置」（模型 + 每日定时）', 2400);
   } catch(e) { toast('保存失败：' + e.message, 2600); return; }
   closeSettings();

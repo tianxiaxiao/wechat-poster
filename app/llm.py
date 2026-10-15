@@ -63,20 +63,22 @@ PROVIDERS = {
 }
 
 
-def _make_client(provider: str, api_key: str = "", base_url: str = "") -> OpenAI:
+def _make_client(provider: str, api_key: str = "", base_url: str = "",
+                 allow_env_key: bool = True) -> OpenAI:
     """构造 OpenAI 客户端；缺省值取自环境变量 + provider 默认值。
-    DeepSeek/openai_compat 的 base_url/api_key 固定优先用 .env（不接受前端旧值覆盖，
-    避免 localStorage 残留旧 key 覆盖正确 env key 导致 401）。"""
+    ⚠️ Key 优先级：**显式传入的 api_key 优先于环境变量**（2026-10-16 修正）。
+    原先是 env 优先，导致「用户自己填了 Key 也用不上、永远被服务端 Key 顶掉」——
+    多租户下必须各人用各人的 Key；是否允许回落到服务端 Key 由 app 层决定后显式传入。
+    allow_env_key=False → 完全不读 .env 的 Key（未获授权的用户，防止偷用管理员的 Key）。"""
     cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
     env_base = os.getenv(cfg["default_base_url"].upper().replace("DEFAULT_BASE_URL", "BASE_URL"), "")
-    env_key = os.getenv(cfg["default_api_key_env"], "").strip()
+    env_key = os.getenv(cfg["default_api_key_env"], "").strip() if allow_env_key else ""
     if provider == "deepseek":
         final_base_url = cfg["default_base_url"]  # 固定官方地址
-        final_key = env_key or api_key
+        final_key = api_key or env_key
     elif provider == "openai_compat":
-        # 固定用 .env/预设的 qwen 端点；前端传的 key 仅在未配置 env key 时生效
-        final_base_url = (env_base or base_url or cfg["default_base_url"]).strip()
-        final_key = env_key or api_key
+        final_base_url = (base_url or env_base or cfg["default_base_url"]).strip()
+        final_key = api_key or env_key
     else:
         final_base_url = (base_url or env_base or cfg["default_base_url"]).strip()
         final_key = api_key
@@ -143,26 +145,28 @@ def list_providers() -> List[Dict]:
             for k, v in PROVIDERS.items()]
 
 
-def describe_config(provider: str, api_key: str = "", base_url: str = "", model: str = "") -> Dict:
+def describe_config(provider: str, api_key: str = "", base_url: str = "", model: str = "",
+                    key_origin: str = "", allow_env_key: bool = True) -> Dict:
     """返回「实际会生效」的连接配置（与真正生成时的优先级**完全一致**），
-    供前端「测试连通」按键回显 —— 避免用户填了 Key/地址却不知真正生效的是哪一个。
+    供前端「测试连通」回显 —— 避免用户填了 Key/地址却不知真正生效的是哪一个。
     只回显 key 的来源，绝不回显 key 本身。
-    优先级（与 generate_articles / ping 对齐）：
-      · deepseek      → base 固定官方；key: env > 表单
-      · openai_compat → base: 表单 > env > 预设（生成走 _urllib_chat，表单优先）；key: env > 表单
-      · ollama 等     → base: 表单 > env > 预设；key: 表单 > env > 占位 ollama
-    """
+    优先级（与 generate_articles / ping / _make_client 对齐，2026-10-16 起「显式传入优先」）：
+      · deepseek      → base 固定官方；key: 传入 > env
+      · openai_compat → base: 传入 > env > 预设；key: 传入 > env
+      · ollama 等     → base: 传入 > env > 预设；key: 传入 > env > 占位 ollama
+    key_origin：由 app 层按多租户授权策略判定后传入（如「你自己的」「管理员共享」），
+    给了就以它为准 —— 因为"能不能用 env 里那把 Key"是 app 层的策略问题，llm 层不该猜。"""
     cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
     env_base = os.getenv(cfg["default_base_url"].upper().replace("DEFAULT_BASE_URL", "BASE_URL"), "")
-    env_key = os.getenv(cfg["default_api_key_env"], "").strip()
+    env_key = os.getenv(cfg["default_api_key_env"], "").strip() if allow_env_key else ""
     if provider == "deepseek":
         final_base = cfg["default_base_url"]              # 官方地址固定
-        final_key = env_key or api_key
-        key_src = "服务端环境变量" if env_key else ("你填写的" if api_key else "未设置")
+        final_key = api_key or env_key
+        key_src = "你填写的" if api_key else ("服务端环境变量" if env_key else "未设置")
     elif provider == "openai_compat":
         final_base = (base_url or env_base or cfg["default_base_url"]).strip()
-        final_key = env_key or api_key
-        key_src = "服务端环境变量" if env_key else ("你填写的" if api_key else "未设置")
+        final_key = api_key or env_key
+        key_src = "你填写的" if api_key else ("服务端环境变量" if env_key else "未设置")
     else:  # ollama 等
         final_base = (base_url or env_base or cfg["default_base_url"]).strip()
         final_key = api_key
@@ -178,8 +182,10 @@ def describe_config(provider: str, api_key: str = "", base_url: str = "", model:
         "base_url": final_base,
         "model": final_model,
         "has_key": bool(final_key),
-        "key_source": key_src,
+        "key_source": key_origin or key_src,
         "needs_api_key": bool(cfg.get("needs_api_key")),
+        "requires_key": requires_user_key(provider, final_base),   # 必须自备 Key？
+        "has_env_key": bool(env_key),                             # 服务端有默认 Key 可共享？
         "is_local": is_local_llm(provider, final_base),
     }
 
@@ -218,24 +224,56 @@ def describe_error(err: str) -> str:
     return "连接失败（详情见下方英文原错）"
 
 
+def server_default_key(provider: str) -> str:
+    """服务端 .env 为某 provider 配置的默认 Key（即「管理员的 Key」来源）。
+    只在【管理员本人】或【被管理员授权的用户】路径下才允许使用（见 app._resolve_llm_for_user）。"""
+    cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+    return os.getenv(cfg["default_api_key_env"], "").strip()
+
+
+def is_own_gateway(base_url: str) -> bool:
+    """base_url 是否指向用户自己的自建网关（如 qwen.dadaobo.com）—— 这类通常不校验 Key。"""
+    u = (base_url or "").strip().lower()
+    return bool(u) and any(h in u for h in _LOCAL_LLM_HOSTS)
+
+
+def requires_user_key(provider: str, base_url: str = "") -> bool:
+    """该 provider + 目标地址下，**是否必须由用户自备 API Key**。
+    · ollama provider              → 不需要（本地服务一般不校验）
+    · 本机/内网地址、用户自建网关   → 不需要（自己家的服务，通常不校验 Key）
+    · 其余（deepseek、指向公网第三方的 openai_compat 等）→ 按 provider 的 needs_api_key 判定
+    说明：只有「需要 Key」且用户既没填自己的、也没被授权共享时，才会被拦（2026-10-16）。"""
+    p = (provider or "").strip().lower()
+    if p == "ollama":
+        return False
+    if is_intranet_url(base_url) or is_own_gateway(base_url):
+        return False
+    cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+    return bool(cfg.get("needs_api_key"))
+
+
 def ping(provider: str = "deepseek", api_key: str = "", base_url: str = "",
-         model: str = "", timeout: int = 30):
+         model: str = "", timeout: int = 30, allow_env_key: bool = True):
     """LLM 探活：用最小请求（max_tokens=8，"ping"）测试端点当前是否可用。
     返回 (ok: bool, err: str)。ok=True 表示可以正常生成；
     服务故障（5xx / 超时 / 连接失败）返回 (False, 错误摘要)；
-    鉴权错误（401/403/无效 key）同样返回 False，由调用方识别后快速失败（等待无意义）。"""
+    鉴权错误（401/403/无效 key）同样返回 False，由调用方识别后快速失败（等待无意义）。
+    allow_env_key=False 时**绝不读服务端 .env 的 Key**（未获管理员授权的用户就是这种情况）。"""
     try:
         cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
         env_model_var = cfg.get("default_model_env") or (provider.upper() + "_MODEL")
         final_model = (model or os.getenv(env_model_var, "") or cfg["default_model"]).strip()
         if provider == "openai_compat":
             final_base = (base_url or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip() or cfg["default_base_url"]
-            final_key2 = (os.getenv("OPENAI_COMPAT_API_KEY") or api_key or "EMPTY").strip()
+            # ⚠️ 传入的 api_key 优先（多租户：各人用各人的 Key），env 仅作兜底且可被禁用
+            env_k = os.getenv("OPENAI_COMPAT_API_KEY") if allow_env_key else ""
+            final_key2 = (api_key or env_k or "EMPTY").strip()
             _urllib_chat(final_base, final_key2, final_model,
                          [{"role": "user", "content": "ping"}],
                          temperature=0, max_tokens=8, timeout=timeout)
         else:
-            client = _make_client(provider, api_key=api_key, base_url=base_url)
+            client = _make_client(provider, api_key=api_key, base_url=base_url,
+                                  allow_env_key=allow_env_key)
             # with_options：探活不重试 + 短超时，一次快速判定
             client = client.with_options(max_retries=0, timeout=timeout)
             client.chat.completions.create(
@@ -408,7 +446,8 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
                       base_url: str = "", model: str = "",
                       product_name: str = "", product_intro: str = "",
                       product_style: str = "",
-                      history_titles: Optional[List[str]] = None) -> List[Dict]:
+                      history_titles: Optional[List[str]] = None,
+                      allow_env_key: bool = True) -> List[Dict]:
     """
     按主题生成多篇差异化营销软文
     返回 [{"title":..., "body_md":...}, ...]
@@ -434,7 +473,8 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
             batch = _gen_batch(topic, n, brand=brand, extra_hint=hint, provider=provider,
                                api_key=api_key, base_url=base_url, model=model,
                                product_name=product_name, product_intro=product_intro,
-                               product_style=product_style, history_titles=history_titles)
+                               product_style=product_style, history_titles=history_titles,
+                               allow_env_key=allow_env_key)
             out.extend(batch)
             log.info("生成批 %d/%d 成功 %d 篇（累计 %d/%d）", bi + 1, len(batch_sizes), len(batch), len(out), count)
         except Exception as e:
@@ -444,7 +484,8 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
                     one = _gen_batch(topic, 1, brand=brand, extra_hint=hint, provider=provider,
                                      api_key=api_key, base_url=base_url, model=model,
                                      product_name=product_name, product_intro=product_intro,
-                               product_style=product_style, history_titles=history_titles)
+                                     product_style=product_style, history_titles=history_titles,
+                                     allow_env_key=allow_env_key)
                     out.extend(one)
                 except Exception as e2:
                     errors.append(str(e2)[:300])
@@ -462,7 +503,8 @@ def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
                base_url: str = "", model: str = "",
                product_name: str = "", product_intro: str = "",
                product_style: str = "",
-               history_titles: Optional[List[str]] = None) -> List[Dict]:
+               history_titles: Optional[List[str]] = None,
+               allow_env_key: bool = True) -> List[Dict]:
     """单次 LLM 调用生成 count（≤ _MAX_PER_CALL）篇；解析失败抛 ValueError。"""
     cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
     # 从 provider 专属 env 读 model（如 OPENAI_COMPAT_MODEL / DEEPSEEK_MODEL）
@@ -471,7 +513,7 @@ def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
     if not final_model:
         raise ValueError(f"provider={provider} 需要指定 model（如 qwen2.5:7b / llama3:8b）")
 
-    client = _make_client(provider, api_key=api_key, base_url=base_url)
+    client = _make_client(provider, api_key=api_key, base_url=base_url, allow_env_key=allow_env_key)
     client = client.with_options(timeout=LLM_TIMEOUT)   # 兜底超时：端点无响应时不无限阻塞
     log.info("LLM 调用: provider=%s model=%s product=%s", provider, final_model, product_name or brand)
 
@@ -499,7 +541,9 @@ def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
         # ⚠️ 关键：llama.cpp / 多数 OpenAI 兼容网关**只认 chat_template_kwargs 里的
         # enable_thinking**（顶层 enable_thinking 经常被忽略，导致一直思考不出正文）。
         final_base = (base_url or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip() or cfg["default_base_url"]
-        final_key2 = (os.getenv("OPENAI_COMPAT_API_KEY") or api_key or "EMPTY").strip()
+        # ⚠️ 传入的 api_key 优先（多租户：各人用各人的 Key），env 仅作兜底且可被禁用
+        env_k = os.getenv("OPENAI_COMPAT_API_KEY") if allow_env_key else ""
+        final_key2 = (api_key or env_k or "EMPTY").strip()
         text = _urllib_chat(final_base, final_key2, final_model, messages,
                             temperature=0.85,
                             max_tokens=6000,

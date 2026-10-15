@@ -170,7 +170,9 @@ def main():
         check("ok 时 hint 为人话", "连通" in str(d.get("hint")), str(d.get("hint")))
         check("ok 时 error 为空", not d.get("error"), str(d.get("error"))[:60])
         check("★ 响应里不含 API Key 明文", CANARY not in raw, "canary 已脱敏")
-        check("★ 只回显 Key 来源不回显 Key", d.get("key_source") in ("你填写的", "服务端环境变量", "未设置", "占位(ollama)"),
+        check("★ 只回显 Key 来源不回显 Key",
+              d.get("key_source") in ("你填写的", "你自己的 Key", "服务端环境变量", "未设置", "占位(ollama)",
+                                      "管理员共享", "管理员共享（服务端默认）", "不需要（本地/自建模型）"),
               f"key_source={d.get('key_source')}")
 
         print("\n[3] 鉴权失败（假 LLM 返回 401）")
