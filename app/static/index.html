@@ -43,6 +43,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .badge-running { background: #FDEDEE; color: #B0000E; }
 .badge-ok { background: #dcfce7; color: #166534; }
 .badge-fail { background: #fee2e2; color: #991b1b; }
+.badge-warn { background: #fef3c7; color: #b45309; }
 .badge-provider-deepseek { background: #ede9fe; color: #6d28d9; }
 .badge-provider-ollama { background: #fef3c7; color: #b45309; }
 .badge-provider-openai_compat { background: #cffafe; color: #155e75; }
@@ -109,6 +110,9 @@ button { line-height: 1.2; }
          onerror="this.style.display='none'" />
     <h1 class="text-xl font-bold text-slate-900 flex items-center gap-2 whitespace-nowrap shrink-0">润致公众号自动发布工具
       <span id="provider-tag" class="hidden"></span>
+      <!-- 模型标签之后：能不能正常生成/发布的状态（点击做一次真体检，不发文章） -->
+      <button id="health-badge" type="button" class="step-badge badge-pending cursor-pointer"
+              title="点一下做一次体检：模型能否连通 + 公众号凭证与 IP 白名单（都不会发布文章）">⚪ 体检中…</button>
     </h1>
     <!-- 当前登录用户 + 退出（右上角；改密码入口已移入「用户管理」） -->
     <div class="ml-auto flex items-center gap-2 text-xs text-slate-500 whitespace-nowrap shrink-0">
@@ -271,6 +275,14 @@ button { line-height: 1.2; }
 
       <label>API Key <span class="font-normal text-slate-400">— 每位用户填自己的 Key</span></label>
       <input id="api_key" type="password" placeholder="sk-... / 本地模型可留空" autocomplete="off" />
+      <!-- 取 Key 直达 / 显示隐藏 / 复制 —— 省得自己找平台入口 -->
+      <div class="flex items-center gap-1.5 flex-wrap mt-1.5">
+        <a id="key-get" href="#" target="_blank" rel="noopener noreferrer"
+           class="preset-btn hidden" title="在新标签页打开该来源的 API Key 管理页">🔑 去获取 Key</a>
+        <button id="key-toggle" type="button" class="preset-btn" title="显示 / 隐藏已输入的 Key（核对粘贴是否正确）">👁 显示</button>
+        <button id="key-copy" type="button" class="preset-btn" title="复制输入框里当前的 Key">📋 复制</button>
+        <span id="key-src-hint" class="text-[11px] text-slate-400"></span>
+      </div>
       <!-- Key 归属/授权状态：说清「现在用的是谁的 Key」，避免误以为能白用默认 Key -->
       <div id="key-policy-hint" class="hint"></div>
 
@@ -402,6 +414,18 @@ button { line-height: 1.2; }
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-lg font-bold text-slate-900">📱 公众号账号管理</h3>
       <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="acct-modal">&times;</button>
+    </div>
+    <!-- 发布出口 IP：照它填公众号后台的 IP 白名单（放在 .llm-fields 之外，避免被表单样式污染） -->
+    <div id="acct-ipbar" class="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+      <div class="flex items-center gap-2 flex-wrap text-xs">
+        <span class="font-semibold text-slate-700">🌐 发布出口 IP</span>
+        <code id="acct-ip" class="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[12px] text-slate-800">查询中…</code>
+        <button id="acct-ip-refresh" type="button" class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">🔄 刷新</button>
+        <button id="acct-ip-copy" type="button" class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">📋 复制</button>
+        <a id="acct-mp-link" href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer"
+           class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开公众号后台</a>
+      </div>
+      <div id="acct-ip-note" class="mt-1 text-[11px] text-slate-400"></div>
     </div>
     <div class="llm-fields">
       <div class="grid grid-cols-1 gap-2">
@@ -883,6 +907,7 @@ function applyProviderToFields() {
   lockProviderFields(id);
   $('#model').value = saved.model || p.default_model || '';
   refreshProviderTag(id);
+  refreshKeyControls();          // 「去获取 Key」直达链接（依赖 provider + base_url）
 }
 
 // DeepSeek 的 base_url 固定为官方地址（只读）；其他 provider 一律允许自行填写。
@@ -937,6 +962,113 @@ function markKeyHintDirty() {
   el.className = 'hint st-dirty';
   el.dataset.status = 'dirty';
   el.textContent = '配置已改动：点「🔌 测试连通」可当场验证，点「保存我的设置」才会生效。';
+}
+
+// ============ 取 Key 直达 / 显示隐藏 / 复制（2026-10-16）============
+// 目标：不用自己去找平台入口 —— 选了什么来源，就直接给对应平台的「API Key 管理页」。
+// 先按 base_url 的主机名匹配（openai_compat 可能是硅基流动/百炼/火山等），再退回 provider 默认页。
+const KEY_PAGES = {
+  deepseek: { url: 'https://platform.deepseek.com/api_keys', name: 'DeepSeek 开放平台' },
+};
+const HOST_KEY_PAGES = [
+  { re: /siliconflow/i,          url: 'https://cloud.siliconflow.cn/account/ak',        name: '硅基流动' },
+  { re: /dashscope|aliyuncs/i,   url: 'https://bailian.console.aliyun.com/?apiKey=1',   name: '阿里云百炼' },
+  { re: /bigmodel|zhipu/i,       url: 'https://open.bigmodel.cn/usercenter/apikeys',    name: '智谱开放平台' },
+  { re: /moonshot/i,             url: 'https://platform.moonshot.cn/console/api-keys',  name: '月之暗面' },
+  { re: /volces|volcengine/i,    url: 'https://console.volcengine.com/ark',             name: '火山方舟' },
+  { re: /deepseek/i,             url: 'https://platform.deepseek.com/api_keys',         name: 'DeepSeek 开放平台' },
+  { re: /openai\.com/i,          url: 'https://platform.openai.com/api-keys',           name: 'OpenAI' },
+];
+function keyPageFor(provider, baseUrl) {
+  const u = String(baseUrl || '');
+  for (const h of HOST_KEY_PAGES) if (h.re.test(u)) return h;
+  return KEY_PAGES[provider] || null;
+}
+function refreshKeyControls() {
+  const prov = $('#provider').value;
+  const page = keyPageFor(prov, $('#base_url').value.trim());
+  const a = $('#key-get');
+  if (page) {
+    a.href = page.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    a.textContent = '🔑 去' + page.name + '获取 Key';
+    a.classList.remove('hidden');
+  } else {
+    a.classList.add('hidden');
+  }
+  const sh = $('#key-src-hint');
+  sh.textContent = page ? '（在该页面创建后复制回来粘贴到上面）'
+    : (prov === 'ollama' ? '本地 Ollama 通常不需要 Key'
+                         : '该来源没有统一的发 Key 页面，请在你的网关/平台后台获取');
+}
+$('#key-toggle')?.addEventListener('click', () => {
+  const el = $('#api_key');
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  $('#key-toggle').textContent = show ? '🙈 隐藏' : '👁 显示';
+});
+$('#key-copy')?.addEventListener('click', async () => {
+  const v = $('#api_key').value.trim();
+  if (!v) { toast('输入框里还没有 Key', 1800); return; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(v); }
+    else { const t = document.createElement('textarea'); t.value = v; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    toast('✅ 已复制 Key', 1800);
+  } catch (e) { toast('复制失败，请手动复制', 2600); }
+});
+
+// ============ 出口 IP（填公众号白名单用）============
+async function loadEgressIp(refresh) {
+  const ipEl = $('#acct-ip');
+  if (!ipEl) return;
+  const note = $('#acct-ip-note');
+  if (refresh) { ipEl.textContent = '查询中…'; }
+  try {
+    const r = await fetch('/api/system/public-ip' + (refresh ? '?refresh=1' : ''));
+    if (!r.ok) { ipEl.textContent = '未取到'; note.textContent = '查询失败（HTTP ' + r.status + '）'; return; }
+    const d = await r.json();
+    ipEl.textContent = d.ip || '未取到';
+    ipEl.dataset.ip = d.ip || '';
+    let n = d.whitelist_path || '';
+    if (d.ok_ip) n += '｜上次验证通过的 IP：' + d.ok_ip;
+    if (d.changed_since_ok) n += '｜⚠️ 与上次不同 —— 可能需要在公众号后台更新白名单（填网段可一劳永逸）';
+    note.textContent = n;
+    note.className = d.changed_since_ok ? 'mt-1 text-[11px] text-amber-600' : 'mt-1 text-[11px] text-slate-400';
+  } catch (e) {
+    ipEl.textContent = '未取到';
+    note.textContent = '查询失败：' + e.message;
+  }
+}
+
+// ============ 顶部健康徽章：能不能生成 / 能不能发布 ============
+// 页面加载只读缓存（秒回）；点一下才做真探测（一次 min ping + 一次取 token），都不发布文章。
+const HEALTH_CLS = { ok: 'badge-ok', warn: 'badge-warn', bad: 'badge-fail', unknown: 'badge-pending' };
+async function loadHealth(refresh) {
+  const b = $('#health-badge');
+  if (!b) return;
+  if (refresh) { b.textContent = '⏳ 体检中…'; b.className = 'step-badge badge-pending cursor-pointer'; }
+  try {
+    const r = await fetch('/api/system/status' + (refresh ? '?refresh=1' : ''));
+    if (!r.ok) { b.textContent = '⚪ 状态未知'; b.className = 'step-badge badge-pending cursor-pointer'; return; }
+    const d = await r.json();
+    b.className = 'step-badge ' + (HEALTH_CLS[d.overall] || 'badge-pending') + ' cursor-pointer';
+    b.textContent = d.label || '⚪ 状态未知';
+    b.dataset.overall = d.overall || '';
+    b.title = (d.detail || '') + '\n\n（点一下重新体检；只会做一次最小模型请求 + 取一次 token，不会发布文章）';
+  } catch (e) {
+    b.textContent = '⚪ 状态未知';
+    b.className = 'step-badge badge-pending cursor-pointer';
+    b.title = '读取状态失败：' + e.message;
+  }
+}
+$('#health-badge')?.addEventListener('click', () => loadHealth(true));
+// 改了模型/Key 之后：旧结论已过期，明确提示"点一下重新体检"，不要继续显示绿/红
+function markHealthDirty() {
+  const b = $('#health-badge');
+  if (!b) return;
+  b.className = 'step-badge badge-pending cursor-pointer';
+  b.textContent = '⚪ 已保存 · 点击体检';
+  b.dataset.overall = 'unknown';
+  b.title = '配置刚改过，点一下重新体检（不会发布文章）';
 }
 
 function refreshProviderTag(id) {
@@ -1069,12 +1201,15 @@ $('#provider').addEventListener('change', () => {
   lockProviderFields(id);          // ★ 必须：否则从 deepseek 切过来会残留只读锁，填不了地址/Key
   setLlmTestStatus('idle', '');
   markKeyHintDirty();
+  refreshKeyControls();            // 换来源后，「去获取 Key」要指向新平台的 Key 页面
 });
 // 手动改了 Address / Key / Model → 提示"尚未生效"
 ['#api_key', '#base_url', '#model'].forEach(sel => {
   const el = $(sel);
   if (el) el.addEventListener('input', markKeyHintDirty);
 });
+// 手改 Base URL 时，取 Key 的直达页也要跟着变（openai_compat 可能是硅基流动/百炼/…）
+$('#base_url')?.addEventListener('input', refreshKeyControls);
 
 // ---- 测试大模型连通（按钮位于「取消」与「保存我的设置」之间）----
 function setLlmTestStatus(kind, text) {
@@ -1192,6 +1327,7 @@ $('#settings-save').addEventListener('click', async () => {
       return;
     }
     toast('✅ 已保存「我的设置」（模型 + 每日定时）', 2400);
+    markHealthDirty();     // 模型/Key 变了 → 顶部状态徽章的旧结论已过期
   } catch(e) { toast('保存失败：' + e.message, 2600); return; }
   closeSettings();
 });
@@ -1916,7 +2052,18 @@ $('#acct-add').addEventListener('click', async () => {
 });
 // 弹层开关
 $('#prod-btn').addEventListener('click', () => { $('#prod-modal').classList.remove('hidden'); loadProducts(); });
-$('#acct-btn').addEventListener('click', () => { $('#acct-modal').classList.remove('hidden'); loadAccounts(); });
+$('#acct-btn').addEventListener('click', () => { $('#acct-modal').classList.remove('hidden'); loadAccounts(); loadEgressIp(false); });
+// 出口 IP：刷新 / 复制 / 打开公众号后台
+$('#acct-ip-refresh').addEventListener('click', () => loadEgressIp(true));
+$('#acct-ip-copy').addEventListener('click', async () => {
+  const ip = $('#acct-ip').dataset.ip || $('#acct-ip').textContent.trim();
+  if (!ip || ip === '未取到' || ip === '查询中…') { toast('还没有取到 IP', 1800); return; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(ip); }
+    else { const t = document.createElement('textarea'); t.value = ip; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    toast('✅ 已复制出口 IP：' + ip, 2400);
+  } catch (e) { toast('复制失败，请手动选中复制：' + ip, 3200); }
+});
 document.querySelectorAll('.modal-x').forEach(x => x.addEventListener('click', () => { $('#'+x.dataset.close).classList.add('hidden'); }));
 ['prod-modal','acct-modal','topic-modal'].forEach(mid => { const el=$('#'+mid); el.addEventListener('click', (e)=>{ if(e.target===el) el.classList.add('hidden'); }); });
 
@@ -2002,6 +2149,8 @@ loadAccounts();
 loadTopics();
 loadSchedule();
 loadUserSettings();   // 载入「我的设置」：模型 + 每日定时（多租户，按登录用户隔离）
+loadHealth(false);    // 顶部「能不能生成/发布」徽章（先读缓存，秒回；点击才真体检）
+setInterval(() => loadHealth(false), 10 * 60 * 1000);   // 每 10 分钟轻量刷新一次
 // 定时设置变更 → 立即保存（账号/产品同步快照，到点按所选发布）
 $('#sched_enable').addEventListener('change', saveSchedule);
 $('#sched_time').addEventListener('change', saveSchedule);

@@ -78,6 +78,12 @@ JS_MAIN = """
     providerHasModel: /deepseek-chat|gpt-|qwen|glm|claude|kimi|doubao/i.test(tag.textContent),
     // 只看页头第一排的按钮（第二排是功能入口，不算）
     firstRowButtons: [...row.querySelectorAll('button')].map(b => b.textContent.trim()).filter(Boolean),
+    // 2026-10-16：标题行新增「能否生成/发布」徽章，必须排在模型标签**之后**
+    healthAfterTag: (() => {
+      const b = document.getElementById('health-badge');
+      if (!b || !tag) return null;
+      return b.getBoundingClientRect().left >= tag.getBoundingClientRect().right - 2;
+    })(),
     pwFormInUsers: !!document.querySelector('#users-modal #pw-btn'),
     notifyDefaultChecked: !!document.querySelector('#notify_me')?.checked,
     notifyInForm: !!document.querySelector('#run-form #notify_me'),
@@ -216,7 +222,13 @@ const {{ chromium }} = require('playwright-core');
 
         print("\n[3] 主界面只留退出按钮")
         btns = d.get("firstRowButtons") or []
-        check("头部只有「退出」按钮", btns == ["退出"], str(btns))
+        # 2026-10-16：标题行新增了「能否生成/发布」的状态徽章（#health-badge），
+        # 它是**状态指示**不是导航按钮，这里把它排除后再断言"只剩退出"。
+        nav_btns = [b for b in btns if "体检" not in b and "状态" not in b and b != "⚪ 体检中…"]
+        check("头部导航按钮只剩「退出」", nav_btns == ["退出"], str(btns))
+        check("★ 标题行有生成/发布状态徽章（模型标签之后）",
+              any(("体检" in b or "状态" in b) for b in btns) and d.get("healthAfterTag") is True,
+              f"btns={btns} afterTag={d.get('healthAfterTag')}")
         check("头部没有改密码按钮", not d.get("pwFormInHeader"), "")
         check("显示当前登录用户", "管理员" in (d.get("curUser") or ""), d.get("curUser", ""))
 

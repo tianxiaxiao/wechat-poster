@@ -1538,6 +1538,9 @@ async def api_llm_test(body: LlmTestIn, request: Request):
                                model=cfg["model"], key_origin=cfg["key_source"],
                                allow_env_key=cfg["allow_env_key"])
     if perr:
+        _LLM_PROBE[me["id"]] = {"ok": False, "blocked": True, "ts": time.time(), "hint": perr,
+                                "provider": cfg["provider"], "model": cfg["model"],
+                                "key_source": cfg["key_source"]}
         return {"ok": False, "elapsed_ms": 0, "hint": perr, "error": "",
                 "blocked": True, **info}
     prov, api_key, base_url, model = cfg["provider"], cfg["api_key"], cfg["base_url"], cfg["model"]
@@ -1561,7 +1564,180 @@ async def api_llm_test(body: LlmTestIn, request: Request):
     audit.audit(request, "llm.test",
                 f"测试大模型连通：{prov} · {info['model']} → {'成功' if ok else '失败'}（{ms}ms）",
                 user=me, level="info" if ok else "warn")
+    # 顺手喂给主页的状态徽章（避免它再单独探测一次）
+    _LLM_PROBE[me["id"]] = {"ok": bool(ok), "blocked": False, "ts": time.time(),
+                            "provider": prov, "model": info["model"],
+                            "key_source": info["key_source"], "elapsed_ms": ms,
+                            "hint": hint, "error": "" if ok else (err or "")[:300]}
     return {"ok": bool(ok), "elapsed_ms": ms, "error": (err or "")[:300], "hint": hint, **info}
+
+
+# ========== 系统体检：出口 IP + 「能不能生成 / 能不能发布」（2026-10-16 新增）==========
+# 主页那颗状态徽章、以及「📱 公众号管理」里的实时出口 IP，都来自这里。
+# 设计原则：**页面加载只读缓存、用户点一下才真探测**（LLM 一次 min ping、微信只取 access_token），
+# 避免每次刷新都去打外部接口；两种探测都**不会发布任何文章**。
+_IP_CACHE = {"ip": "", "ts": 0.0}      # 公网出口 IP 短缓存
+_LLM_PROBE = {}                        # user_id      -> 最近一次 LLM 探测结果
+_WX_PROBE = {}                         # account_id   -> 最近一次微信凭证/白名单探测结果
+_IP_TTL = 60                           # 出口 IP 缓存秒数
+_LLM_TTL = 15 * 60                     # LLM 探测结果保质期（超期标 stale，但仍先显示旧的）
+_WX_TTL = 30 * 60                      # 微信探测结果保质期
+_WX_MIN_INTERVAL = 15                  # 两次真实微信探测的最小间隔（防连点打爆接口）
+
+
+def _egress_ip(refresh: bool = False, timeout: int = 10) -> str:
+    """公网出口 IP：服务端直连 + 国内源探测（_current_public_ip 已强制绕过代理），带 60s 缓存。"""
+    now = time.time()
+    if not refresh and _IP_CACHE["ip"] and now - _IP_CACHE["ts"] < _IP_TTL:
+        return _IP_CACHE["ip"]
+    ip = _current_public_ip(timeout=timeout)
+    if ip:
+        _IP_CACHE.update(ip=ip, ts=now)
+    return ip or _IP_CACHE["ip"]
+
+
+def _pick_probe_account(me: dict, db):
+    """挑一个用于体检的公众号：该用户默认号 → 第一个可用号。"""
+    accs = db_api.list_accounts_for_user(me["id"], me["role"] == "admin", db)
+    if not accs:
+        return None
+    us = db_api.get_user_setting(me["id"], db)
+    if us and us.default_account_id:
+        for a in accs:
+            if a.id == us.default_account_id:
+                return a
+    return accs[0]
+
+
+def _status_summary(lc: dict, wx: dict, acc: dict, egress_changed: bool, sched: dict) -> dict:
+    """把各项探测结果归纳成一句话结论（**纯函数**，便于离线单测）。
+    返回 {"overall": ok|warn|bad|unknown, "label": 徽章文案, "detail": 鼠标悬停的详细说明}"""
+    if not acc:
+        return {"overall": "bad", "label": "🔴 没有可用公众号",
+                "detail": "还没有可用于发布的公众号（或该号不属于你）。请到「📱 公众号」添加。"}
+    if not lc:
+        return {"overall": "unknown", "label": "⚪ 未体检 · 点击检测",
+                "detail": "点一下这颗徽章，会真跑一次：① 模型连通（一次最小请求）② 公众号凭证与 IP 白名单（只取 token）。都不会发布文章。"}
+    if lc.get("blocked"):
+        return {"overall": "bad", "label": "🔴 缺 API Key，发不出去",
+                "detail": lc.get("hint") or "未设置你自己的 API Key"}
+    if lc.get("ok") is False:
+        return {"overall": "bad", "label": "🔴 模型连不上",
+                "detail": f"{lc.get('hint') or '模型不可用'}" + (f"｜{str(lc.get('error'))[:160]}" if lc.get("error") else "")}
+    if wx.get("ok") is False:
+        if int(wx.get("errcode") or 0) == 40164:
+            return {"overall": "warn", "label": "🟠 出口 IP 不在白名单",
+                    "detail": wx.get("hint") or "请把出口 IP 加入公众号 IP 白名单"}
+        return {"overall": "bad", "label": "🔴 公众号凭证异常",
+                "detail": wx.get("hint") or wx.get("err") or "取 access_token 失败"}
+    if wx.get("ok") is None:
+        return {"overall": "warn", "label": "🟡 生成正常 · 发布未验证",
+                "detail": "模型连通正常；点一下徽章可顺带验证公众号凭证与 IP 白名单（不发文章）。"}
+    if egress_changed:
+        return {"overall": "warn", "label": "🟠 出口 IP 变了",
+                "detail": "当前出口 IP 与上次验证通过时不同 —— 若微信开始报 40164，请更新 IP 白名单。"}
+    d = f"模型：{lc.get('provider')} · {lc.get('model')}（{lc.get('key_source')}）"
+    if sched.get("enabled"):
+        d += f"｜定时：每天 {sched.get('time')}"
+        d += "（今天已跑）" if sched.get("ran_today") else "（今天还没跑）"
+    else:
+        d += "｜未开启定时（可手动发布）"
+    d += f"｜发布号：{acc.get('name')}"
+    return {"overall": "ok", "label": "🟢 生成与发布都正常", "detail": d}
+
+
+@app.get("/api/system/public-ip")
+def api_system_public_ip(request: Request, refresh: int = 0):
+    # ⚠️ 同步 def（不是 async def）：里面是阻塞式网络探测，交给 FastAPI 线程池跑，别卡事件循环
+    """当前公网出口 IP（服务端探测）+ 上次验证可用的 IP + 白名单填写路径。
+    给「📱 公众号管理」显示用：照着复制到公众号后台的 IP 白名单即可。"""
+    auth.need_login(request)
+    ip = _egress_ip(refresh=bool(refresh))
+    ok_ip = get_setting("ip_whitelist_ok_ip", "")
+    return {
+        "ip": ip,
+        "cached_sec": int(max(0, time.time() - _IP_CACHE["ts"])) if _IP_CACHE["ip"] else 0,
+        "ok_ip": ok_ip,
+        "changed_since_ok": bool(ok_ip and ip and ok_ip != ip),
+        "whitelist_page": "https://mp.weixin.qq.com/",
+        "whitelist_path": "公众号后台 → 设置与开发 → 基本配置 → IP白名单（支持网段，如 106.85.0.0/16）",
+    }
+
+
+@app.get("/api/system/status")
+def api_system_status(request: Request, refresh: int = 0):
+    # ⚠️ 同步 def（不是 async def）：这里会真跑一次模型 ping + 取一次 token（阻塞），
+    #    必须走线程池；否则模型不通时会阻塞事件循环十几秒，把任务轮询一起拖停。
+    """一体检：现在能不能【生成】+ 能不能【发布】。
+    refresh=0 → 只读缓存（页面加载用，秒回）；refresh=1 → 真做探测（点徽章时用）。
+    ⚠️ 两种探测都不发布任何文章：生成侧一次最小 ping；发布侧只取 access_token。"""
+    me = auth.need_login(request)
+    uid = me["id"]
+    db = SessionLocal()
+    try:
+        acc = _pick_probe_account(me, db)
+        acc_info = ({"id": acc.id, "name": acc.name, "appid": acc.appid} if acc else None)
+        us = db_api.get_user_setting(uid, db)
+        sched = {"enabled": bool(us and us.schedule_enabled),
+                 "time": (us.schedule_time if us else "10:00") or "10:00",
+                 "last_run_date": (us.schedule_last_run_date if us else "") or "",
+                 "ran_today": bool(us and us.schedule_last_run_date == datetime.now().strftime("%Y-%m-%d"))}
+    finally:
+        db.close()
+
+    # ① 生成侧：LLM（复用「测试连通」的结果；refresh=1 才真跑）
+    lc = dict(_LLM_PROBE.get(uid) or {})
+    if refresh or not lc:
+        cfg, perr = _resolve_llm_for_user(uid)
+        if perr:
+            lc = {"ok": False, "blocked": True, "ts": time.time(), "hint": perr,
+                  "provider": cfg["provider"], "model": cfg["model"], "key_source": cfg["key_source"]}
+        else:
+            t0 = time.time()
+            try:
+                ok, err = llm.ping(cfg["provider"], api_key=cfg["api_key"], base_url=cfg["base_url"],
+                                   model=cfg["model"], timeout=15, allow_env_key=cfg["allow_env_key"])
+            except Exception as e:  # noqa: BLE001
+                ok, err = False, str(e)[:200]
+            lc = {"ok": bool(ok), "blocked": False, "ts": time.time(),
+                  "elapsed_ms": int((time.time() - t0) * 1000),
+                  "provider": cfg["provider"], "model": cfg["model"], "key_source": cfg["key_source"],
+                  "hint": "连通正常" if ok else llm.describe_error(err),
+                  "error": "" if ok else (err or "")[:300]}
+        _LLM_PROBE[uid] = lc
+
+    # ② 发布侧：微信公众号凭证 + 出口 IP 白名单（默认读缓存；连点有最小间隔保护）
+    wx = dict(_WX_PROBE.get(acc.id) or {}) if acc else {}
+    wx_age = int(time.time() - wx["ts"]) if wx.get("ts") else None
+    need_probe = acc and (refresh or not wx or (wx_age is not None and wx_age > _WX_TTL))
+    if need_probe and (wx_age is None or wx_age >= _WX_MIN_INTERVAL):
+        r = wechat_api.probe_credentials(acc.appid, acc.secret_enc)
+        wx = dict(r); wx["ts"] = time.time(); wx["account"] = acc.name
+        _WX_PROBE[acc.id] = wx
+        wx_age = 0
+        if r.get("ok"):
+            ip_now = _egress_ip()
+            if ip_now:
+                set_setting("ip_whitelist_ok_ip", ip_now)   # 记下"已验证可用"的出口 IP
+    ip = _egress_ip()
+    ok_ip = get_setting("ip_whitelist_ok_ip", "")
+    changed = bool(ok_ip and ip and ok_ip != ip)
+    wx_out = {"ok": wx.get("ok"), "errcode": int(wx.get("errcode") or 0),
+              "hint": wx.get("hint", ""), "err": wx.get("err", ""),
+              "blocked_ip": wx.get("ip", ""), "age_sec": wx_age, "account": (acc.name if acc else "")}
+    sumry = _status_summary(lc, wx_out, acc_info, changed, sched)
+    return {
+        "overall": sumry["overall"], "label": sumry["label"], "detail": sumry["detail"],
+        "llm": {**{k: lc.get(k) for k in ("ok", "blocked", "provider", "model", "key_source",
+                                          "hint", "elapsed_ms")},
+                "age_sec": int(time.time() - lc["ts"]) if lc.get("ts") else None,
+                "stale": bool(lc.get("ts") and time.time() - lc["ts"] > _LLM_TTL)},
+        "wechat": wx_out,
+        "egress": {"ip": ip, "ok_ip": ok_ip, "changed_since_ok": changed,
+                   "whitelist_path": "公众号后台 → 设置与开发 → 基本配置 → IP白名单"},
+        "account": acc_info,
+        "schedule": sched,
+    }
 
 
 class AdminUserScheduleIn(BaseModel):

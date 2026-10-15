@@ -111,8 +111,12 @@ const READ_KEYFIELD = () => {
     await adm.click("#gear-btn");
     await adm.waitForSelector("#settings-modal:not(.hidden)", { timeout: 8000 });
     await adm.waitForSelector("#key-policy-hint", { state: "attached", timeout: 8000 });
-    await adm.waitForFunction(() => document.getElementById("key-policy-hint").dataset.status !== "",
-                              { timeout: 8000 });
+    // ⚠️ 必须等"确实拿到了状态"：元素没有 data-status 时 dataset.status 是 undefined，
+//    写成 `!== ""` 恒为真 → 等于没等，会读到空提示（曾因此误报 3 条失败）
+    await adm.waitForFunction(() => {
+      const el = document.getElementById("key-policy-hint");
+      return !!el && !!el.dataset.status;
+    }, { timeout: 15000 });
     let hint = await adm.evaluate(READ_HINT);
     check("「我的设置」有 Key 归属状态提示", !!hint && hint.text.length > 0, hint ? hint.text.slice(0, 60) : "缺失");
     check("★ 管理员状态=shared（用服务端默认 Key）", hint.status === "shared", hint.status);
@@ -156,8 +160,10 @@ const READ_KEYFIELD = () => {
 
     await ed.click("#gear-btn");
     await ed.waitForSelector("#settings-modal:not(.hidden)", { timeout: 8000 });
-    await ed.waitForFunction(() => document.getElementById("key-policy-hint").dataset.status !== "",
-                             { timeout: 8000 });
+    await ed.waitForFunction(() => {
+      const el = document.getElementById("key-policy-hint");
+      return !!el && !!el.dataset.status;
+    }, { timeout: 15000 });
     hint = await ed.evaluate(READ_HINT);
     check("★ 普通用户未填 Key → 状态=missing", hint.status === "missing", hint.status);
     const rgb = (s) => (s.match(/\d+/g) || []).map(Number);
@@ -233,8 +239,10 @@ const READ_KEYFIELD = () => {
     await ed.reload({ waitUntil: "load" });
     await ed.click("#gear-btn");
     await ed.waitForSelector("#settings-modal:not(.hidden)", { timeout: 8000 });
-    await ed.waitForFunction(() => document.getElementById("key-policy-hint").dataset.status !== "",
-                             { timeout: 8000 });
+    await ed.waitForFunction(() => {
+      const el = document.getElementById("key-policy-hint");
+      return !!el && !!el.dataset.status;
+    }, { timeout: 15000 });
     hint = await ed.evaluate(READ_HINT);
     check("★ 授权后普通用户状态=shared", hint.status === "shared", hint.status);
     check("提示说明来自「管理员共享」", hint.text.includes("管理员共享"), hint.text.slice(0, 80));

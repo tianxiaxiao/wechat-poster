@@ -58,6 +58,57 @@ def _http_json(url: str, body=None, method="POST") -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def parse_probe_error(d: dict) -> dict:
+    """把微信的错误响应解析成「可读结论」——纯函数，便于离线单测。
+    最有用的是 40164（IP 不在白名单）：微信的 errmsg 里**带着它看到的那个 IP**，
+    直接告诉用户该往白名单里加什么。"""
+    errcode = int(d.get("errcode") or 0)
+    errmsg = str(d.get("errmsg") or "")
+    ip = ""
+    m = re.search(r"invalid ip\s*([0-9.]+)", errmsg, re.I) or re.search(r"([0-9]{1,3}(?:\.[0-9]{1,3}){3})", errmsg)
+    if m:
+        ip = m.group(1)
+    if errcode == 40164:
+        hint = (f"出口 IP {ip or '（见下方原文）'} 不在公众号 IP 白名单 —— "
+                f"请到公众号后台「设置与开发 → 基本配置 → IP白名单」把它加上"
+                f"（支持网段，如 106.85.0.0/16，加网段就不用频繁改）")
+    elif errcode in (40013, 40125, 41004):
+        hint = "appid 或 AppSecret 不正确（请核对公众号后台「基本配置」里的值）"
+    elif errcode == 40125:
+        hint = "AppSecret 不正确"
+    elif errcode:
+        hint = f"微信接口报错 {errcode}：{errmsg[:120]}"
+    else:
+        hint = "未能取得 access_token（返回体异常）"
+    return {"ok": False, "errcode": errcode, "err": errmsg[:300], "ip": ip, "hint": hint}
+
+
+def probe_credentials(appid: str, secret: str, timeout: int = 12) -> dict:
+    """**无副作用**地验证「appid/secret 是否正确 + 本机出口 IP 是否已在白名单」。
+
+    为什么单独写一个：取 access_token 本来就是验证白名单最轻的手段（不发任何文章），
+    但 get_access_token() 用的是模块级全局 _ACCOUNT + token 缓存，
+    在定时批次发布过程中被并发调用会**把账号切错**。所以这里直接带参请求，完全不碰全局状态。
+
+    返回 {"ok": bool, "errcode": int, "err": str, "ip": str, "hint": str}
+    """
+    appid = (appid or "").strip()
+    secret = (secret or "").strip()
+    if not appid or not secret:
+        return {"ok": False, "errcode": 0, "err": "未提供 appid / AppSecret",
+                "ip": "", "hint": "该公众号没有可用的 appid/AppSecret"}
+    try:
+        d = _http_json("https://api.weixin.qq.com/cgi-bin/stable_token",
+                       {"grant_type": "client_credential", "appid": appid, "secret": secret,
+                        "force_refresh": False})
+    except Exception as e:  # noqa: BLE001 —— 网络不通时也算"验证失败"，但要说清是网络问题
+        return {"ok": False, "errcode": 0, "err": str(e)[:200], "ip": "",
+                "hint": "请求微信接口失败（网络/DNS/超时）：请检查 NAS 能否访问 api.weixin.qq.com"}
+    if d.get("access_token"):
+        return {"ok": True, "errcode": 0, "err": "", "ip": "", "hint": "凭证有效，且出口 IP 已在白名单"}
+    return parse_probe_error(d)
+
+
 def get_access_token(force: bool = False) -> str:
     """获取 access_token。
 
