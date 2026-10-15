@@ -122,6 +122,46 @@ def _add_draft_with_cover_retry(title: str, body_html: str, author: str, digest:
     raise last_err if last_err else RuntimeError("add_draft 失败")
 
 
+# ---- LLM 探活等待（2026-10-15 新增）----
+# 背景：DeepSeek 曾在无人值守批次中途 503（Service too busy），程序照跑导致整批文章失败。
+# 策略：每篇生成前先探活；不通则按 30s→60s→120s→300s 退避等待，恢复后继续生成；
+#       最长等 LLM_WAIT_MAX_MIN 分钟（默认 120，可用环境变量覆盖），超时才判本篇失败。
+#       鉴权错误（401/403/无效 key）等待无意义 → 立即失败并给出明确提示。
+LLM_WAIT_MAX_MIN = int(os.getenv("LLM_WAIT_MAX_MIN", "120"))
+_LLM_RECHECK_SEC = [30, 60, 120, 300]
+
+
+def _is_llm_auth_error(err: str) -> bool:
+    s = (err or "").lower()
+    return ("401" in s or "403" in s or "unauthorized" in s
+            or "authentication" in s or "invalid api key" in s
+            or "incorrect api key" in s)
+
+
+def _llm_wait_ready(job: dict, log_sink: list) -> bool:
+    """阻塞直到 LLM 探活成功；超时/鉴权失败返回 False（调用方据此判本篇失败）。"""
+    provider = job.get("provider", "deepseek")
+    deadline = time.time() + LLM_WAIT_MAX_MIN * 60
+    attempt = 0
+    while True:
+        ok, err = llm.ping(provider, api_key=job.get("api_key", ""),
+                           base_url=job.get("base_url", ""), model=job.get("llm_model", ""))
+        if ok:
+            if attempt:
+                log_sink.append(f"  ✅ LLM 已恢复（共等待 {attempt} 轮），继续生成")
+            return True
+        if _is_llm_auth_error(err):
+            log_sink.append(f"  ❌ LLM 鉴权失败（{err[:140]}），等待无法解决 → 本篇判失败")
+            return False
+        if time.time() >= deadline:
+            log_sink.append(f"  ❌ LLM 持续不可用超过 {LLM_WAIT_MAX_MIN} 分钟，放弃等待 → 本篇判失败（{err[:140]}）")
+            return False
+        wait = _LLM_RECHECK_SEC[min(attempt, len(_LLM_RECHECK_SEC) - 1)]
+        attempt += 1
+        log_sink.append(f"  ⏳ LLM 探活失败（{err[:100]}）→ {wait}s 后重试（第 {attempt} 轮，最长等待 {LLM_WAIT_MAX_MIN} 分钟）")
+        time.sleep(wait)
+
+
 def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
                     extra_history: Optional[list] = None) -> list:
     """带历史相似度去重的 LLM 生成（两层防护）：
@@ -131,17 +171,31 @@ def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
     extra_history：本次任务中前面主题已定稿的文章，也参与后续主题的比对。"""
     history = dedup.load_history() + [h for h in (extra_history or [])]
     history_titles = [h["title"] for h in history if h.get("title")]
-    items = llm.generate_articles(
-        topic, count, brand=job["brand"], extra_hint=job.get("extra_hint", ""),
-        provider=job.get("provider", "deepseek"),
-        api_key=job.get("api_key", ""),
-        base_url=job.get("base_url", ""),
-        model=job.get("llm_model", ""),
-        product_name=job.get("product_name", ""),
-        product_intro=job.get("product_intro", ""),
-        product_style=job.get("product_style", ""),
-        history_titles=history_titles or None,
-    )
+    # 生成前先探活：LLM 挂了就等（30s→60s→120s→300s 退避），恢复后继续 —— 无人值守批次不再因
+    # DeepSeek 临时故障（如 503 Service too busy）把后续篇全部判死。
+    if not _llm_wait_ready(job, log_sink):
+        raise RuntimeError("LLM 不可用（探活超时或鉴权失败），本篇生成中止")
+    items = []
+    for _try in range(3):   # 生成中途遇服务故障 → 等待恢复后重试（最多 3 次尝试）
+        try:
+            items = llm.generate_articles(
+                topic, count, brand=job["brand"], extra_hint=job.get("extra_hint", ""),
+                provider=job.get("provider", "deepseek"),
+                api_key=job.get("api_key", ""),
+                base_url=job.get("base_url", ""),
+                model=job.get("llm_model", ""),
+                product_name=job.get("product_name", ""),
+                product_intro=job.get("product_intro", ""),
+                product_style=job.get("product_style", ""),
+                history_titles=history_titles or None,
+            )
+            break
+        except Exception as e:
+            if _try == 2 or _is_llm_auth_error(str(e)):
+                raise
+            log_sink.append(f"  ⚠️ 生成失败（{str(e)[:100]}）→ 等待 LLM 恢复后重试（第 {_try + 2}/3 次尝试）")
+            if not _llm_wait_ready(job, log_sink):
+                raise
     accepted = []
     for it in items:
         r = dedup.check_article(it.get("title", ""), it.get("body_md", ""), history)

@@ -105,6 +105,36 @@ def list_providers() -> List[Dict]:
             for k, v in PROVIDERS.items()]
 
 
+def ping(provider: str = "deepseek", api_key: str = "", base_url: str = "",
+         model: str = "", timeout: int = 30):
+    """LLM 探活：用最小请求（max_tokens=8，"ping"）测试端点当前是否可用。
+    返回 (ok: bool, err: str)。ok=True 表示可以正常生成；
+    服务故障（5xx / 超时 / 连接失败）返回 (False, 错误摘要)；
+    鉴权错误（401/403/无效 key）同样返回 False，由调用方识别后快速失败（等待无意义）。"""
+    try:
+        cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+        env_model_var = cfg.get("default_model_env") or (provider.upper() + "_MODEL")
+        final_model = (model or os.getenv(env_model_var, "") or cfg["default_model"]).strip()
+        if provider == "openai_compat":
+            final_base = (base_url or os.getenv("OPENAI_COMPAT_BASE_URL") or "").strip() or cfg["default_base_url"]
+            final_key2 = (os.getenv("OPENAI_COMPAT_API_KEY") or api_key or "EMPTY").strip()
+            _urllib_chat(final_base, final_key2, final_model,
+                         [{"role": "user", "content": "ping"}],
+                         temperature=0, max_tokens=8, timeout=timeout)
+        else:
+            client = _make_client(provider, api_key=api_key, base_url=base_url)
+            # with_options：探活不重试 + 短超时，一次快速判定
+            client = client.with_options(max_retries=0, timeout=timeout)
+            client.chat.completions.create(
+                model=final_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=8, temperature=0,
+            )
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:200]
+
+
 BASE_SYSTEM = """你是{product}的资深新媒体文案，专写"看不出是广告"的微信公众号爆款软文：第一人称、真实故事感，读者看完会想买。
 
 【最高优先级】用户素材里若有【写作要求】【标题要求】【转化要求】【禁忌】等指令，必须逐条满足；与下面通用规则冲突时，一律以用户素材为准。
