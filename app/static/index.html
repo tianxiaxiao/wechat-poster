@@ -410,22 +410,27 @@ button { line-height: 1.2; }
 
 <!-- ===== 公众号账号管理 modal ===== -->
 <div id="acct-modal" class="settings-modal hidden">
-  <div class="settings-panel">
+  <!-- 面板放宽到 580px：顶部「出口 IP」那一排是单行不换行的（IP 框 + 刷新/复制/打开后台），
+       520px 装不下会溢出 9px 把「打开公众号后台」挤出去 -->
+  <div class="settings-panel" style="max-width:580px">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-lg font-bold text-slate-900">📱 公众号账号管理</h3>
       <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="acct-modal">&times;</button>
     </div>
     <!-- 发布出口 IP：照它填公众号后台的 IP 白名单（放在 .llm-fields 之外，避免被表单样式污染） -->
     <div id="acct-ipbar" class="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-      <div class="flex items-center gap-2 flex-wrap text-xs">
-        <span class="font-semibold text-slate-700">🌐 发布出口 IP</span>
-        <code id="acct-ip" class="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[12px] text-slate-800">查询中…</code>
-        <button id="acct-ip-refresh" type="button" class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">🔄 刷新</button>
-        <button id="acct-ip-copy" type="button" class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">📋 复制</button>
+      <div id="acct-ip-row" class="flex items-center gap-1.5 flex-nowrap whitespace-nowrap text-xs">
+        <span class="font-semibold text-slate-700 shrink-0">🌐 发布出口 IP</span>
+        <!-- 固定宽度：查询中/具体 IP 长度不同，不固定会让后面的按钮左右跳 -->
+        <code id="acct-ip" class="shrink-0 inline-block w-[104px] text-center px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[12px] text-slate-800">查询中…</code>
+        <button id="acct-ip-refresh" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">🔄 刷新</button>
+        <button id="acct-ip-copy" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">📋 复制</button>
         <a id="acct-mp-link" href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer"
-           class="px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开公众号后台</a>
+           class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开公众号后台</a>
       </div>
+      <!-- 第一排：白名单填写路径；第二排：上次验证通过的 IP（漂移对比） -->
       <div id="acct-ip-note" class="mt-1 text-[11px] text-slate-400"></div>
+      <div id="acct-ip-note2" class="text-[11px] text-slate-400"></div>
     </div>
     <div class="llm-fields">
       <div class="grid grid-cols-1 gap-2">
@@ -1020,22 +1025,29 @@ $('#key-copy')?.addEventListener('click', async () => {
 async function loadEgressIp(refresh) {
   const ipEl = $('#acct-ip');
   if (!ipEl) return;
-  const note = $('#acct-ip-note');
+  const note = $('#acct-ip-note');      // 第一排：白名单填写路径
+  const note2 = $('#acct-ip-note2');    // 第二排：上次验证通过的 IP（用来对比有没有漂移）
   if (refresh) { ipEl.textContent = '查询中…'; }
+  const fail = (msg) => {
+    ipEl.textContent = '未取到';
+    note.textContent = msg;
+    note.className = 'mt-1 text-[11px] text-amber-600';
+    note2.textContent = '';
+  };
   try {
     const r = await fetch('/api/system/public-ip' + (refresh ? '?refresh=1' : ''));
-    if (!r.ok) { ipEl.textContent = '未取到'; note.textContent = '查询失败（HTTP ' + r.status + '）'; return; }
+    if (!r.ok) { fail('查询失败（HTTP ' + r.status + '）'); return; }
     const d = await r.json();
     ipEl.textContent = d.ip || '未取到';
     ipEl.dataset.ip = d.ip || '';
-    let n = d.whitelist_path || '';
-    if (d.ok_ip) n += '｜上次验证通过的 IP：' + d.ok_ip;
-    if (d.changed_since_ok) n += '｜⚠️ 与上次不同 —— 可能需要在公众号后台更新白名单（填网段可一劳永逸）';
-    note.textContent = n;
-    note.className = d.changed_since_ok ? 'mt-1 text-[11px] text-amber-600' : 'mt-1 text-[11px] text-slate-400';
+    note.textContent = d.whitelist_path || '';
+    note.className = 'mt-1 text-[11px] text-slate-400';
+    let n2 = d.ok_ip ? '上次验证通过的 IP：' + d.ok_ip : '';
+    if (d.changed_since_ok) n2 += '（⚠️ 与当前不同，可能需要更新白名单；填网段可一劳永逸）';
+    note2.textContent = n2;
+    note2.className = d.changed_since_ok ? 'text-[11px] text-amber-600' : 'text-[11px] text-slate-400';
   } catch (e) {
-    ipEl.textContent = '未取到';
-    note.textContent = '查询失败：' + e.message;
+    fail('查询失败：' + e.message);
   }
 }
 

@@ -95,14 +95,24 @@ const READ_IPBAR = () => {
     return { right: Math.round(r.right), left: Math.round(r.left), visible: el.offsetParent !== null };
   };
   const link = document.getElementById("acct-mp-link");
+  const row = document.getElementById("acct-ip-row");
+  const ipr = ip.getBoundingClientRect();
+  const mpr = link ? link.getBoundingClientRect() : null;
+  const rr = row ? row.getBoundingClientRect() : null;
   return {
     inLlmFields: !!bar.closest(".llm-fields"),
     ipText: (ip.textContent || "").trim(), ipData: ip.dataset.ip || "",
+    ipWidth: Math.round(ipr.width),
+    // ★ 「打开公众号后台」必须和出口 IP 在同一排（同一行的垂直中心差 < 12px）
+    mpSameRow: !!(mpr && Math.abs((mpr.top + mpr.height / 2) - (ipr.top + ipr.height / 2)) < 12),
+    rowOverflowX: rr ? row.scrollWidth - row.clientWidth : null,
+    rowH: rr ? Math.round(rr.height) : null,
     overflowX: bar.scrollWidth - bar.clientWidth,
     barRight: Math.round(br.right), h: Math.round(br.height),
     refresh: btn("acct-ip-refresh"), copy: btn("acct-ip-copy"), mp: btn("acct-mp-link"),
     mpHref: link ? link.getAttribute("href") : "", mpTarget: link ? link.getAttribute("target") : "",
     note: (document.getElementById("acct-ip-note") || {}).textContent || "",
+    note2: (document.getElementById("acct-ip-note2") || {}).textContent || "",
     visible: bar.offsetParent !== null,
   };
 };
@@ -278,20 +288,41 @@ const READ_IPBAR = () => {
     check("「打开公众号后台」指向 mp.weixin.qq.com 且新标签打开",
           /mp\.weixin\.qq\.com/.test(ib.mpHref) && ib.mpTarget === "_blank",
           `${ib.mpHref} target=${ib.mpTarget}`);
-    check("下方给出了白名单填写路径提示", /IP白名单/.test(ib.note), ib.note.slice(0, 60));
+    check("★ 第一排 = 白名单填写路径（含「IP白名单」）", /IP白名单/.test(ib.note), ib.note.slice(0, 60));
+    check("★ 第二排 = 上次验证通过的 IP", /^上次验证通过的 IP：/.test(ib.note2.trim()), ib.note2.slice(0, 60));
+    check("★ 两排文案不混在一起（第一排不含「上次验证通过」）", !/上次验证通过/.test(ib.note), ib.note.slice(0, 40));
     await shot(p, "si_03_ipbar.png", "#acct-modal .settings-panel");
 
-    console.log("\n[C2] 刷新按钮：点一下会重新取一次");
+    console.log("\n[C2] 打开公众号后台固定在出口 IP 那一排（不换行、不溢出）");
+    check("★ 「打开公众号后台」与 IP 框同一排", ib.mpSameRow === true, `sameRow=${ib.mpSameRow}`);
+    check("★ IP 那一行不横向溢出", ib.rowOverflowX !== null && ib.rowOverflowX <= 0,
+          `rowOverflow=${ib.rowOverflowX}px rowH=${ib.rowH}px`);
+    check("★ IP 那一行是单行高度（没被挤成两行）", ib.rowH !== null && ib.rowH <= 34, `rowH=${ib.rowH}px`);
+
+    console.log("\n[C3] IP 框固定大小：查询中 / 有结果，宽度必须一致");
+    // ⚠️ 同样不能靠固定 sleep：挂 MutationObserver 记录每次文案变化时的实际宽度
+    await p.evaluate(() => {
+      window.__w = [];
+      const el = document.getElementById("acct-ip");
+      window.__w.push(el.offsetWidth);
+      window.__mo2 = new MutationObserver(() => window.__w.push(el.offsetWidth));
+      window.__mo2.observe(el, { childList: true, characterData: true, subtree: true });
+    });
     await p.click("#acct-ip-refresh");
-    await p.waitForTimeout(120);
+    await p.waitForTimeout(150);
     const during2 = await p.evaluate(() => (document.getElementById("acct-ip").textContent || "").trim());
     await p.waitForFunction(() => {
       const el = document.getElementById("acct-ip");
       return !!el && !/查询中/.test(el.textContent || "");
     }, { timeout: 30000 });
     const after2 = await p.evaluate(READ_IPBAR);
+    const widths = await p.evaluate(() => { window.__mo2.disconnect(); return window.__w.slice(); });
     check("★ 刷新时有「查询中…」反馈", /查询中/.test(during2), during2);
     check("★ 刷新后仍给出确定结论", IPV4.test(after2.ipText) || after2.ipText === "未取到", after2.ipText);
+    check("★ 整个过程中 IP 框宽度恒定（不因文案长短跳动）",
+          widths.length >= 2 && new Set(widths).size === 1,
+          `采集到的宽度=${JSON.stringify(widths)}`);
+    check("★ 第二排仍显示上次验证通过的 IP", /上次验证通过的 IP：/.test(after2.note2), after2.note2.slice(0, 50));
 
     console.log("\n[D] 保存模型设置后：旧结论标记过期（不继续显示绿/红）");
     await p.click('[data-close="acct-modal"]');
