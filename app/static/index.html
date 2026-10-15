@@ -277,9 +277,14 @@ button { line-height: 1.2; }
       </datalist>
       <div class="hint" id="provider-hint"></div>
 
-      <div class="mt-4 flex justify-end gap-2">
-        <button id="settings-cancel" type="button" class="px-4 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50">取消</button>
-        <button id="settings-save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存我的设置</button>
+      <!-- 连通测试状态：独占一行（避免文案把按钮挤到第二行），始终占位以免出现时抖动 -->
+      <div id="llm-test-box" class="mt-4 pt-3 border-t border-dashed border-slate-200">
+        <div id="llm-test-status" class="text-xs leading-4 min-h-4 break-all text-slate-400"></div>
+        <div class="mt-2 flex items-center justify-end gap-2">
+          <button id="settings-cancel" type="button" class="px-4 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50">取消</button>
+          <button id="settings-test" type="button" title="用上面的配置发一次最小请求，验证模型是否真的可用（不会生成文章）" class="px-4 py-2 text-sm border border-emerald-300 text-emerald-700 rounded-lg hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed">🔌 测试连通</button>
+          <button id="settings-save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存我的设置</button>
+        </div>
       </div>
     </div>
 
@@ -851,28 +856,34 @@ function applyProviderToFields() {
   const p = PROVIDER_LIST.find(x => x.id === id) || {};
   const saved = loadStored();
   $('#provider-hint').textContent = PROVIDER_HINTS[id] || '';
-  // DeepSeek base_url 固定为官方地址，不可改
   if (id === 'deepseek') {
-    $('#base_url').value = 'https://api.deepseek.com/v1';
-    $('#base_url').readOnly = true;
-    $('#base_url').title = 'DeepSeek 使用官方固定地址，不可修改';
-    // DeepSeek key 用服务端 .env（权威），前端不缓存不传旧 key，避免覆盖导致 401
-    $('#api_key').value = '';
-    $('#api_key').placeholder = '使用服务端 .env 配置，无需填写';
-    $('#api_key').readOnly = true;
-    $('#api_key').title = 'DeepSeek 自动使用服务器 .env 的 DEEPSEEK_API_KEY';
+    lockProviderFields(id);                     // 服务端固定官方地址 + .env 的 Key
   } else {
     $('#base_url').value = saved.base_url || p.default_base_url || '';
-    $('#base_url').readOnly = false;
-    $('#base_url').title = '';
     $('#api_key').value = saved.api_key || '';
-    $('#api_key').placeholder = 'sk-... / 留空';
-    $('#api_key').readOnly = false;
-    $('#api_key').title = '';
+    lockProviderFields(id);                     // 解锁，允许自行填写
   }
   $('#model').value = saved.model || p.default_model || '';
   refreshProviderTag(id);
 }
+
+// DeepSeek 用服务端固定地址与 .env Key（两个字段只读）；其他 provider 一律允许自行填写。
+// ⚠️ 必须由**所有** provider 入口调用：打开设置、选快捷预设、直接切下拉。
+//    漏掉「直接切下拉」会导致：从 deepseek 切到本地模型后 base_url/api_key 仍被锁住、填不进去
+//    （2026-10-16 发现的真 bug，正是"经常换模型"的用法会踩到）。
+function lockProviderFields(id) {
+  const deep = (id === 'deepseek');
+  if (deep) {
+    $('#base_url').value = 'https://api.deepseek.com/v1';
+    $('#api_key').value = '';
+  }
+  $('#base_url').readOnly = deep;
+  $('#base_url').title = deep ? 'DeepSeek 使用官方固定地址，不可修改' : '';
+  $('#api_key').readOnly = deep;
+  $('#api_key').placeholder = deep ? '使用服务端 .env 配置，无需填写' : 'sk-... / 留空';
+  $('#api_key').title = deep ? 'DeepSeek 自动使用服务器 .env 的 DEEPSEEK_API_KEY' : '';
+}
+
 function refreshProviderTag(id) {
   const tag = $('#provider-tag');
   const saved = loadStored();
@@ -937,24 +948,15 @@ function findPresetByValue(val) {
 function applyPreset(p) {
   if (!p) return;
   $('#provider').value = p.provider;
-  if (p.provider === 'deepseek') {
-    $('#base_url').value = 'https://api.deepseek.com/v1';
-    $('#base_url').readOnly = true;
-    $('#api_key').value = '';
-    $('#api_key').readOnly = true;
-    $('#api_key').placeholder = '使用服务端 .env 配置，无需填写';
-  } else {
+  if (p.provider !== 'deepseek') {
     $('#base_url').value = p.base_url || '';
-    $('#base_url').readOnly = false;
-    $('#base_url').title = '';
     $('#api_key').value = p.api_key || '';
-    $('#api_key').readOnly = false;
-    $('#api_key').placeholder = 'sk-... / 留空';
-    $('#api_key').title = '';
   }
+  lockProviderFields(p.provider);   // 统一处理只读锁（deepseek 锁、其余解锁）
   $('#model').value = p.model || '';
   $('#provider-hint').textContent = PROVIDER_HINTS[p.provider] || '';
   refreshProviderTag(p.provider);
+  setLlmTestStatus('idle', '');     // 换了模型来源，清掉上次的连通结果
   toast('已载入预设：' + p.name, 2200);
 }
 $('#preset').addEventListener('change', (e) => {
@@ -997,11 +999,58 @@ $('#gear-btn').addEventListener('click', async () => {
   await loadUserSettings();          // 先载入「我的设置」（模型 + 定时）
   applyProviderToFields();           // 再以 localStorage（已被服务端值覆盖）刷新字段
   refreshProviderTag($('#provider').value);
+  setLlmTestStatus('idle', '');      // 每次打开清掉上次的连通结果，避免误读
 });
 $('#settings-close').addEventListener('click', closeSettings);
 $('#settings-cancel').addEventListener('click', closeSettings);
 function closeSettings() { $('#settings-modal').classList.add('hidden'); }
-$('#provider').addEventListener('change', () => { const id=$('#provider').value; const p=PROVIDER_LIST.find(x=>x.id===id)||{}; $('#base_url').value=p.default_base_url||''; $('#api_key').value=''; $('#model').value=p.default_model||''; });
+$('#provider').addEventListener('change', () => {
+  const id = $('#provider').value;
+  const p = PROVIDER_LIST.find(x => x.id === id) || {};
+  $('#base_url').value = p.default_base_url || '';
+  $('#api_key').value = '';
+  $('#model').value = p.default_model || '';
+  lockProviderFields(id);          // ★ 必须：否则从 deepseek 切过来会残留只读锁，填不了地址/Key
+  setLlmTestStatus('idle', '');
+});
+
+// ---- 测试大模型连通（按钮位于「取消」与「保存我的设置」之间）----
+function setLlmTestStatus(kind, text) {
+  const el = $('#llm-test-status');
+  if (!el) return;
+  const cls = { idle:'text-slate-400', busy:'text-slate-500',
+                ok:'text-emerald-600', err:'text-rose-600' }[kind] || 'text-slate-400';
+  el.className = 'text-xs leading-4 min-h-4 break-all ' + cls;
+  el.textContent = text || '';
+  el.title = text || '';
+}
+$('#settings-test').addEventListener('click', async () => {
+  const btn = $('#settings-test');
+  if (btn.disabled) return;
+  const payload = { provider: $('#provider').value, base_url: $('#base_url').value.trim(),
+                    api_key: $('#api_key').value.trim(), model: $('#model').value.trim() };
+  const oldHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '⏳ 测试中…';
+  setLlmTestStatus('busy', '正在连接模型…（最长约 20 秒）');
+  try {
+    const r = await fetch('/api/llm/test', { method:'POST', headers:{'Content-Type':'application/json'},
+                                             body: JSON.stringify(payload) });
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok) { setLlmTestStatus('err', '❌ ' + (d.detail || ('请求失败 HTTP ' + r.status))); return; }
+    if (d.ok) {
+      setLlmTestStatus('ok', `✅ 连通正常 · ${d.model || ''}${d.is_local ? '（本地/自建）' : ''} · ${d.elapsed_ms}ms`);
+    } else {
+      const tail = d.error ? ` ｜ ${String(d.error).slice(0, 90)}` : '';
+      setLlmTestStatus('err', `❌ ${d.hint || '连接失败'}${tail}`);
+    }
+  } catch (e) {
+    setLlmTestStatus('err', '❌ ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = oldHtml;
+  }
+});
 
 // ============ 我的设置：模型 + 每日定时（多租户，按用户隔离） ============
 async function loadUserSettings() {
@@ -1034,7 +1083,7 @@ function renderUserProdOptions(sel) {
 function renderUserAcctCheckboxes(selectedIds) {
   const ids = new Set((selectedIds || []).map(Number));
   const el = $('#user_acct_list');
-  if (!ACCOUNTS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无公众号，请先点右上「📱 公众号」添加。</div>'; return; }
+  if (!ACCOUNTS.length) { el.innerHTML = '<div class="col-span-2 text-xs text-slate-400 whitespace-nowrap">暂无公众号，请先点右上「📱 公众号」添加。</div>'; return; }
   el.innerHTML = ACCOUNTS.map(a => {
     const on = ids.has(a.id);
     const tag = a.mine ? '' : (a.owner_id == null ? ' <span class="text-[10px] text-slate-400">(共享)</span>'

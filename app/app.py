@@ -1345,6 +1345,58 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
     return {"ok": True}
 
 
+class LlmTestIn(BaseModel):
+    """「测试连通」入参：用当前表单里的配置测；留空的字段回退到该用户已保存的设置。"""
+    provider: str = ""
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+@app.post("/api/llm/test")
+async def api_llm_test(body: LlmTestIn, request: Request):
+    """测试大模型连通性（同步、短超时，供设置页按钮即时反馈）。
+
+    · 只做一次最小请求（max_tokens=8 的 "ping"），不会真正生成文章、不计费多少；
+    · 未填写的字段按「表单 → 该用户已保存 → 服务端环境变量」优先级解析，
+      与真正生成时用的配置一致（并在返回里告知 Key 的实际来源）；
+    · 返回 ok / 耗时 / 实际模型与地址 / 可读错误提示，方便用户当场定位问题。
+    """
+    me = auth.need_login(request)
+    saved = db_api.get_user_setting(me["id"])
+    prov = (body.provider or (saved.llm_provider if saved else "") or "deepseek").strip()
+    if prov not in llm.PROVIDERS:
+        raise HTTPException(400, f"provider 必须是 {list(llm.PROVIDERS)} 之一")
+    base_url = (body.base_url or (saved.llm_base_url if saved else "") or "").strip()
+    model = (body.model or (saved.llm_model if saved else "") or "").strip()
+    api_key = (body.api_key or (saved.llm_api_key if saved else "") or "").strip()
+
+    info = llm.describe_config(prov, api_key=api_key, base_url=base_url, model=model)
+    if info["needs_api_key"] and not info["has_key"]:
+        return {"ok": False, "elapsed_ms": 0, "hint": "未设置 API Key：请在上面填入你的 Key（或让服务端配置好环境变量）",
+                "error": "", **info}
+
+    t0 = time.time()
+    try:
+        ok, err = llm.ping(prov, api_key=api_key, base_url=base_url, model=model, timeout=20)
+    except Exception as e:  # noqa: BLE001 —— ping 内部已兜异常，这里只防御未知情况
+        ok, err = False, str(e)[:200]
+    ms = int((time.time() - t0) * 1000)
+    if ok:
+        hint = "连通正常，可以正常生成文章"
+        if info["is_local"]:
+            hint = "连通正常（本地/自建模型为逐篇生成，速度取决于你的机器）"
+    else:
+        hint = llm.describe_error(err)
+        if _is_llm_auth_error(err):
+            hint = "鉴权失败：API Key 无效或无权限" + (f"（当前使用的是「{info['key_source']}」的 Key）"
+                                                        if info.get("key_source") else "")
+    audit.audit(request, "llm.test",
+                f"测试大模型连通：{prov} · {info['model']} → {'成功' if ok else '失败'}（{ms}ms）",
+                user=me, level="info" if ok else "warn")
+    return {"ok": bool(ok), "elapsed_ms": ms, "error": (err or "")[:300], "hint": hint, **info}
+
+
 class AdminUserScheduleIn(BaseModel):
     """管理员代管某用户每日定时的入参（只管定时，不动其模型/Key）。"""
     schedule_enabled: bool = False

@@ -11,11 +11,21 @@ import os
 import re
 import json
 import logging
+import urllib.request
 from typing import List, Dict, Optional
 from urllib.parse import urlparse
 from openai import OpenAI
 
 log = logging.getLogger("poster.llm")
+
+# 直连 opener（显式清空代理）：本机 / 内网地址必须直连 ——
+# 系统代理通常访问不到 127.0.0.1 / 192.168.x，会把请求变成 502 之类的无用错误。
+_OPENER_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _urlopen_direct(req, timeout: int = 30):
+    """直连请求（OpenerDirector 本身不可 call，需走 .open()）。"""
+    return _OPENER_DIRECT.open(req, timeout=timeout)
 
 # ---- 通用参数 ----
 # 单次 LLM 调用最长等待（秒）：超时即判失败，避免端点卡死时整批无意义干转。
@@ -75,8 +85,17 @@ def _make_client(provider: str, api_key: str = "", base_url: str = "") -> OpenAI
         # Ollama 本地一般不校验 key，传 "ollama" 占位即可
         if not final_key:
             final_key = env_key or ("ollama" if provider == "ollama" else "")
+    # 本机/内网地址：让 SDK 直连（trust_env=False 即忽略 HTTP_PROXY），
+    # 否则局域网自建模型会被系统代理搅乱（返回 502 等）。公网地址保持原行为。
+    _kw = {}
+    if is_intranet_url(final_base_url):
+        try:
+            import httpx
+            _kw["http_client"] = httpx.Client(trust_env=False, timeout=LLM_TIMEOUT)
+        except Exception:  # noqa: BLE001 —— httpx 不可用则退回默认（不影响公网场景）
+            pass
     return OpenAI(api_key=final_key or "EMPTY", base_url=final_base_url,
-                  default_headers={"User-Agent": BROWSER_UA})
+                  default_headers={"User-Agent": BROWSER_UA}, **_kw)
 
 
 def _urllib_chat(base_url: str, api_key: str, model: str, messages: list,
@@ -85,8 +104,8 @@ def _urllib_chat(base_url: str, api_key: str, model: str, messages: list,
     """基于 urllib 的 OpenAI 兼容 chat/completions 调用。
     用于自建 OpenAI 兼容网关 / 本地 Ollama 等：
     - 统一带浏览器 UA + Origin（部分网关/Cloudflare 会拦截 curl/SDK 默认 UA，报 403 error 1010）；
-    - 默认超时 LLM_TIMEOUT，端点卡死时快速失败而非无限等待。"""
-    import urllib.request
+    - 默认超时 LLM_TIMEOUT，端点卡死时快速失败而非无限等待；
+    - 本机/内网地址强制直连（绕过系统代理）。"""
     o = urlparse(base_url)
     origin = f"{o.scheme}://{o.netloc}" if o.netloc else ""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -107,7 +126,9 @@ def _urllib_chat(base_url: str, api_key: str, model: str, messages: list,
         "Origin": origin,
         "Referer": origin + "/",
     })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # 本机/内网地址直连（绕过系统代理），公网地址保持默认行为
+    _open = _urlopen_direct if is_intranet_url(url) else urllib.request.urlopen
+    with _open(req, timeout=timeout) as resp:
         d = json.loads(resp.read().decode("utf-8"))
     try:
         return (d["choices"][0]["message"]["content"] or "").strip()
@@ -120,6 +141,81 @@ def list_providers() -> List[Dict]:
     return [{"id": k, "label": v["label"], "default_base_url": v["default_base_url"],
              "default_model": v["default_model"], "needs_api_key": v["needs_api_key"]}
             for k, v in PROVIDERS.items()]
+
+
+def describe_config(provider: str, api_key: str = "", base_url: str = "", model: str = "") -> Dict:
+    """返回「实际会生效」的连接配置（与真正生成时的优先级**完全一致**），
+    供前端「测试连通」按键回显 —— 避免用户填了 Key/地址却不知真正生效的是哪一个。
+    只回显 key 的来源，绝不回显 key 本身。
+    优先级（与 generate_articles / ping 对齐）：
+      · deepseek      → base 固定官方；key: env > 表单
+      · openai_compat → base: 表单 > env > 预设（生成走 _urllib_chat，表单优先）；key: env > 表单
+      · ollama 等     → base: 表单 > env > 预设；key: 表单 > env > 占位 ollama
+    """
+    cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+    env_base = os.getenv(cfg["default_base_url"].upper().replace("DEFAULT_BASE_URL", "BASE_URL"), "")
+    env_key = os.getenv(cfg["default_api_key_env"], "").strip()
+    if provider == "deepseek":
+        final_base = cfg["default_base_url"]              # 官方地址固定
+        final_key = env_key or api_key
+        key_src = "服务端环境变量" if env_key else ("你填写的" if api_key else "未设置")
+    elif provider == "openai_compat":
+        final_base = (base_url or env_base or cfg["default_base_url"]).strip()
+        final_key = env_key or api_key
+        key_src = "服务端环境变量" if env_key else ("你填写的" if api_key else "未设置")
+    else:  # ollama 等
+        final_base = (base_url or env_base or cfg["default_base_url"]).strip()
+        final_key = api_key
+        if provider == "ollama" and not base_url:
+            final_base = cfg["default_base_url"]
+        if not final_key:
+            final_key = env_key or ("ollama" if provider == "ollama" else "")
+        key_src = "你填写的" if api_key else ("服务端环境变量" if env_key else ("占位(ollama)" if provider == "ollama" else "未设置"))
+    env_model_var = cfg.get("default_model_env") or (provider.upper() + "_MODEL")
+    final_model = (model or os.getenv(env_model_var, "") or cfg["default_model"]).strip()
+    return {
+        "provider": provider,
+        "base_url": final_base,
+        "model": final_model,
+        "has_key": bool(final_key),
+        "key_source": key_src,
+        "needs_api_key": bool(cfg.get("needs_api_key")),
+        "is_local": is_local_llm(provider, final_base),
+    }
+
+
+def describe_error(err: str) -> str:
+    """把底层异常翻译成一句人话，给「测试连通」按钮显示。
+    注意：Windows 中文版系统返回的是中文错误（如「由于目标计算机积极拒绝」），
+    所以中英文关键词都要匹配。"""
+    s = (err or "").lower()
+    raw = err or ""
+    if not s:
+        return "未知错误"
+    if "401" in s or "unauthorized" in s or "invalid api key" in s or "incorrect api key" in s:
+        return "鉴权失败：API Key 无效或未填写"
+    if "403" in s:
+        return "被拒绝(403)：Key 无权限，或被网关/Cloudflare 拦截"
+    if "404" in s:
+        return "地址不对(404)：base_url 需指向 OpenAI 兼容根路径（通常以 /v1 结尾）"
+    if "429" in s or "rate limit" in s:
+        return "触发限流(429)：稍后重试或换 Key"
+    if "timed out" in s or "timeout" in s or "超时" in raw:
+        return "连接超时：服务未启动、地址不通，或模型响应过慢"
+    if "refused" in s or "拒绝" in raw:
+        return "连接被拒：服务未启动，或端口/地址写错"
+    if ("name or service not known" in s or "nodename nor servname" in s or "getaddrinfo" in s
+            or "解析" in raw):
+        return "域名解析失败：base_url 中的主机名写错或无法解析"
+    if "certificate" in s or "ssl" in s or "证书" in raw:
+        return "TLS/证书错误：https 证书不匹配或被中间设备拦截"
+    if "returned abnormal" in s or "返回异常结构" in raw:
+        return "返回结构异常：端点不是 OpenAI 兼容接口，或模型名不存在"
+    if "502" in s or "bad gateway" in s:
+        return "网关 502：目标不可达（若本机/服务端配了代理，可能是代理访问不到这个地址）"
+    if "500" in s or "503" in s or "504" in s or "server error" in s:
+        return "服务端故障(5xx)：模型服务临时不可用，稍后重试"
+    return "连接失败（详情见下方英文原错）"
 
 
 def ping(provider: str = "deepseek", api_key: str = "", base_url: str = "",
@@ -269,6 +365,13 @@ _LOCAL_LLM_HOSTS = tuple(
     h.strip().lower()
     for h in os.getenv("LOCAL_LLM_HOSTS", "dadaobo.com").split(",")
     if h.strip())
+
+
+def is_intranet_url(url: str) -> bool:
+    """URL 是否指向本机 / 内网（这类地址必须直连，不能走系统代理 ——
+    代理通常无法访问 127.0.0.1 / 192.168.x，会返回 502 等无用错误）。"""
+    u = (url or "").strip().lower()
+    return bool(u) and bool(_INTRANET_RE.search(u))
 
 
 def is_local_llm(provider: str, base_url: str = "") -> bool:
