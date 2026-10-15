@@ -353,7 +353,19 @@ button { line-height: 1.2; }
           <button id="topic-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加主题</button>
         </div>
       </div>
-      <div class="hint">已有主题（按归属产品区分；可点编辑改归属）：</div>
+      <!-- 批量归类：勾选多条 → 一次改归属 -->
+      <div class="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs">
+        <label class="inline-flex items-center gap-1.5 cursor-pointer select-none font-medium text-slate-700">
+          <input type="checkbox" id="topic-sel-all" class="w-3.5 h-3.5 accent-blue-600" /> 全选
+        </label>
+        <span id="topic-sel-count" class="text-slate-500">已选 0 条</span>
+        <span class="text-slate-300">|</span>
+        <span class="text-slate-600">批量归类到</span>
+        <select id="topic-bulk-product" class="field-input" style="width:180px"></select>
+        <button id="topic-bulk-apply" type="button" class="px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">应用到已选</button>
+        <span id="topic-bulk-msg" class="ml-auto"></span>
+      </div>
+      <div class="hint">已有主题（勾选可批量归类；也可点「编辑」逐条改）：</div>
       <div id="topic-list-mgr" class="space-y-2 max-h-56 overflow-auto"></div>
     </div>
   </div>
@@ -1433,21 +1445,26 @@ function fillProductSelect(sel, selected) {
   if ([...sel.options].some(o => o.value === want)) sel.value = want;
 }
 // 主题库管理页：加载【全部】主题（不受当前产品过滤，方便逐个改归属）
-async function openTopicMgr() {
+// ⚠️ keepMsg=true：批量归类后刷新时保留「✅ 已归类」提示，不让它一闪而过
+async function openTopicMgr(keepMsg) {
   $('#topic-modal').classList.remove('hidden');
   if (!PRODUCTS.length) { try { await loadProducts(); } catch(e){} }
   try { ALL_TOPICS = await (await fetch('/api/topics')).json(); } catch(e) { ALL_TOPICS = []; }
   fillProductSelect($('#topic_product'), 0);
+  const bulk = $('#topic-bulk-product');
+  fillProductSelect(bulk, bulk.value || 0);   // 批量下拉保留上次选择，便于连续归类
+  if (!keepMsg) $('#topic-bulk-msg').textContent = '';
   renderTopicMgr();
 }
 function renderTopicMgr() {
   const el = $('#topic-list-mgr');
-  if (!ALL_TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; return; }
+  if (!ALL_TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; updateTopicSelCount(); return; }
   el.innerHTML = ALL_TOPICS.map(t => {
     const badge = t.product_id
       ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-blue-50 text-blue-700 border border-blue-200">${esc(prodName(t.product_id))}</span>`
       : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">通用</span>`;
-    return `<div id="row-topic-${t.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    return `<div id="row-topic-${t.id}" class="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <input type="checkbox" class="topic-row-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-id="${t.id}" title="勾选后可批量归类" />
     <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(t.name)}${badge}</div>
       <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
     <div class="flex-shrink-0 flex items-center gap-1 ml-2">
@@ -1456,6 +1473,23 @@ function renderTopicMgr() {
     </div>
   </div>`;
   }).join('');
+  // 重新渲染后勾选归零 → 同步计数与「全选」
+  el.querySelectorAll('.topic-row-cb').forEach(cb => cb.addEventListener('change', updateTopicSelCount));
+  const all = $('#topic-sel-all');
+  if (all) { all.checked = false; all.indeterminate = false; }
+  updateTopicSelCount();
+}
+function topicCheckedIds() {
+  return [...document.querySelectorAll('#topic-list-mgr .topic-row-cb:checked')]
+    .map(c => parseInt(c.dataset.id)).filter(n => !isNaN(n));
+}
+function updateTopicSelCount() {
+  const ids = topicCheckedIds();
+  const total = document.querySelectorAll('#topic-list-mgr .topic-row-cb').length;
+  const cnt = $('#topic-sel-count');
+  if (cnt) cnt.textContent = `已选 ${ids.length} 条`;
+  const all = $('#topic-sel-all');
+  if (all) { all.checked = total > 0 && ids.length === total; all.indeterminate = ids.length > 0 && ids.length < total; }
 }
 function editTopicRow(id) {
   const t = ALL_TOPICS.find(x => x.id === id); if (!t) return;
@@ -1490,6 +1524,31 @@ async function delTopic(id) {
   await openTopicMgr();
   window._topicInitDone = false; loadTopics();
 }
+// 批量归类：全选 / 应用到已选
+$('#topic-sel-all').addEventListener('change', (e) => {
+  document.querySelectorAll('#topic-list-mgr .topic-row-cb').forEach(cb => { cb.checked = e.target.checked; });
+  updateTopicSelCount();
+});
+$('#topic-bulk-apply').addEventListener('click', async () => {
+  const ids = topicCheckedIds();
+  const msg = $('#topic-bulk-msg');
+  const fail = (t) => { msg.textContent = t; msg.className = 'ml-auto text-rose-600'; };
+  if (!ids.length) { fail('请先勾选主题'); return; }
+  const pid = parseInt($('#topic-bulk-product').value) || 0;
+  const pn = pid ? prodName(pid) : '通用（所有产品）';
+  if (!confirm(`把选中的 ${ids.length} 个主题归类到「${pn}」？`)) return;
+  const btn = $('#topic-bulk-apply');
+  const oldTxt = btn.textContent;
+  btn.disabled = true; btn.textContent = '处理中…';
+  try {
+    const r = await apiCall('/api/topics/bulk-assign', { ids, product_id: pid }, 'POST');
+    msg.textContent = `✅ 已归类 ${r.updated} 条 → ${pn}`;
+    msg.className = 'ml-auto text-green-600';
+    await openTopicMgr(true);                      // 刷新归属徽章（保留成功提示）
+    window._topicInitDone = false; loadTopics();   // 主页面同步
+  } catch(e) { fail('❌ ' + e.message); }
+  finally { btn.disabled = false; btn.textContent = oldTxt; }
+});
 $('#topic-btn').addEventListener('click', openTopicMgr);
 $('#topic-add').addEventListener('click', async () => {
   const name = $('#topic_name').value.trim(), desc = $('#topic_desc').value.trim();

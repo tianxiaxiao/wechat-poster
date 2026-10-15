@@ -1096,6 +1096,41 @@ async def edit_topic_api(tid: int, t: TopicIn, request: Request):
         db.close()
 
 
+class TopicBulkAssignIn(BaseModel):
+    ids: list = []              # 要归类的主题 id 列表
+    product_id: int = 0         # 目标归属；0 = 设为通用
+
+
+@app.post("/api/topics/bulk-assign")
+async def bulk_assign_topics(body: TopicBulkAssignIn, request: Request):
+    """批量把多条主题归到同一个产品（product_id=0 → 设为通用）。
+    主题库管理页的「批量归类」用它，避免逐条 PUT 发 N 个请求。"""
+    me = auth.need_role(request, "editor")
+    try:
+        ids = [int(x) for x in (body.ids or [])]
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "ids 必须是数字列表")
+    if not ids:
+        raise HTTPException(400, "请先勾选要归类的主题")
+    pid = int(body.product_id or 0)
+    db = SessionLocal()
+    try:
+        rows = db.query(Topic).filter(Topic.id.in_(ids)).all()
+        if not rows:
+            raise HTTPException(404, "未找到这些主题")
+        for t in rows:
+            t.product_id = pid
+        db.commit()
+        n = len(rows)
+        pname = _product_name(db, pid)
+        audit.audit(request, "topic.bulk_assign",
+                    f"批量归类 {n} 个主题 → 「{pname}」（#{','.join(str(t.id) for t in rows)[:80]}）",
+                    user=me, level="warn")
+        return {"ok": True, "updated": n, "product_id": pid}
+    finally:
+        db.close()
+
+
 @app.delete("/api/topics/{tid}")
 async def del_topic_api(tid: int, request: Request):
     me = auth.need_role(request, "editor")

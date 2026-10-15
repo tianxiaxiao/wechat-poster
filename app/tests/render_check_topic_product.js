@@ -78,6 +78,7 @@ async function login(page, user, pw) {
     browser = await chromium.launch({ executablePath: CHROME, headless: true });
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
+    page.on("dialog", async (d) => { await d.accept(); });   // 批量归类带 confirm，headless 需自动接受
     await login(page, "admin", ADMIN_PW);
 
     // ---- 造数据：2 个产品 + 3 个主题（唯一名，避开内置种子主题） ----
@@ -140,6 +141,46 @@ async function login(page, user, pw) {
     check("新增主题的归属下拉含「通用」与两个产品",
           optText.includes("通用") && optText.includes("ZZ木梳") && optText.includes("ZZ美食街"),
           optText.slice(0, 60));
+
+    // ---- 批量归类（勾选多条 → 一次改归属） ----
+    console.log("\n[E] 主题库管理页：批量归类");
+    // ⚠️ 弹层在 [D] 阶段已打开：先关闭再重开，保证干净状态（否则点击会被遮罩拦截）
+    await page.$eval('#topic-modal [data-close="topic-modal"]', el => el.click());
+    await page.waitForTimeout(300);
+    await page.$eval("#topic-btn", el => el.click());
+    await page.waitForFunction(() => document.querySelectorAll("#topic-list-mgr .topic-row-cb").length > 0,
+                               { timeout: 8000 });
+    const total = await page.$$eval("#topic-list-mgr .topic-row-cb", els => els.length);
+    check("每行都有勾选框", total > 0, `共${total}行`);
+
+    // 弹层内部是滚动容器，用元素自身 click() 触发（等价触发 change，且不受坐标遮挡影响）
+    await page.$eval("#topic-sel-all", el => el.click());
+    await page.waitForTimeout(300);
+    const cntTxt = await page.$eval("#topic-sel-count", el => el.textContent || "");
+    check(`全选后计数为「已选 ${total} 条」`, cntTxt.includes(`已选 ${total} 条`), cntTxt);
+    const checkedN = await page.$$eval("#topic-list-mgr .topic-row-cb:checked", els => els.length);
+    check("全选后所有行都被勾选", checkedN === total, `checked=${checkedN}/${total}`);
+
+    await page.selectOption("#topic-bulk-product", String(made.id2));   // 归到「ZZ美食街」
+    await page.$eval("#topic-bulk-apply", el => el.click());
+    await page.waitForTimeout(1800);
+    const bmsg = await page.$eval("#topic-bulk-msg", el => el.textContent || "");
+    check("批量归类后显示成功提示", bmsg.includes("已归类"), bmsg);
+    const badges = await page.$$eval("#topic-list-mgr [id^=row-topic-]", els => els.map(e => e.textContent || ""));
+    check("管理页所有主题徽章都变成「ZZ美食街」",
+          badges.length > 0 && badges.every(t => t.includes("ZZ美食街")), `共${badges.length}行`);
+
+    // 归类后：木梳下应看不到任何主题（全被挪到美食街）★核心
+    await page.$eval('#topic-modal [data-close="topic-modal"]', el => el.click());
+    await page.waitForTimeout(400);
+    await page.selectOption("#product_id", String(made.id1));
+    await page.waitForTimeout(1500);
+    const namesM = await page.$$eval("#topic-list .topic-cb", els => els.map(e => e.dataset.name));
+    check("全部归类到美食街后：选木梳已无主题 ★核心", namesM.length === 0, `共${namesM.length}个`);
+    await page.selectOption("#product_id", String(made.id2));
+    await page.waitForTimeout(1500);
+    const namesF = await page.$$eval("#topic-list .topic-cb", els => els.map(e => e.dataset.name));
+    check("选美食街则有主题（归类生效）", namesF.length > 0, `共${namesF.length}个`);
 
     console.log("\n" + "=".repeat(56));
     console.log(`=== 渲染断言：通过 ${pass} / 共 ${pass + fail}；失败 ${fail} ===`);

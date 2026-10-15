@@ -154,7 +154,40 @@ def main():
         names = [t["name"] for t in d]
         check("木梳下：「ZZ通用」仍在", "ZZ通用" in names)
 
-        print("\n[4] [5] 纯函数 _topic_names_for_product + 旧库自动迁移")
+        print("\n[4] 批量归类 /api/topics/bulk-assign")
+        st, d = c.get("/api/topics")
+        byname = {t["name"]: t["id"] for t in d}
+        ids_bulk = [byname["ZZ木梳专属"], byname["ZZ美食专属"], byname["ZZ通用"]]
+        st, d = c.post("/api/topics/bulk-assign", {"ids": ids_bulk, "product_id": 0})
+        check("批量归类到「通用」→ 200 且 updated=3",
+              st == 200 and d.get("updated") == 3, f"HTTP {st} {d}")
+        st, d = c.get(f"/api/topics?product_id={p_mushu}")
+        names = [t["name"] for t in d]
+        check("设为通用后：木梳下重新出现这 3 个",
+              {"ZZ木梳专属", "ZZ美食专属", "ZZ通用"} <= set(names))
+        st, d = c.get(f"/api/topics?product_id={p_food}")
+        names = [t["name"] for t in d]
+        check("设为通用后：美食街下也出现这 3 个", {"ZZ木梳专属", "ZZ美食专属"} <= set(names))
+
+        st, d = c.post("/api/topics/bulk-assign", {"ids": ids_bulk, "product_id": p_food})
+        check("批量归类到「美食街」→ updated=3", st == 200 and d.get("updated") == 3, f"HTTP {st} {d}")
+        st, d = c.get(f"/api/topics?product_id={p_mushu}")
+        names = [t["name"] for t in d]
+        check("归类到美食街后：木梳下不再出现这 3 个 ★核心",
+              not ({"ZZ木梳专属", "ZZ美食专属", "ZZ通用"} & set(names)))
+        st, d = c.get(f"/api/topics?product_id={p_food}")
+        names = [t["name"] for t in d]
+        check("归类到美食街后：美食街下出现这 3 个",
+              {"ZZ木梳专属", "ZZ美食专属", "ZZ通用"} <= set(names))
+
+        st, d = c.post("/api/topics/bulk-assign", {"ids": [], "product_id": 0})
+        check("空 ids → 400", st == 400, f"HTTP {st} {d}")
+        st, d = c.post("/api/topics/bulk-assign", {"ids": [999999], "product_id": 0})
+        check("不存在的 id → 404", st == 404, f"HTTP {st} {d}")
+        st, d = c.post("/api/topics/bulk-assign", {"ids": ["abc"], "product_id": 0})
+        check("ids 非数字 → 400", st == 400, f"HTTP {st} {d}")
+
+        print("\n[5] [6] 纯函数 _topic_names_for_product + 旧库自动迁移")
         code = (
             "import os, sys\n"
             "os.environ['POSTER_DB'] = os.path.join(sys.argv[1], 'probe.db')\n"
