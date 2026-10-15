@@ -203,7 +203,11 @@ def main():
                   f"HTTP {st}")
             check("★ ip 要么是合法 IPv4、要么是空串（探测失败不假装成功）",
                   ip.get("ip") == "" or bool(IPV4.match(ip.get("ip") or "")), f"ip={ip.get('ip')!r}")
-            check("白名单提示里带后台路径", "IP白名单" in ip.get("whitelist_path", ""), ip.get("whitelist_path", "")[:50])
+            _wp = ip.get("whitelist_path", "")
+            check("白名单提示里带后台路径", "IP白名单" in _wp, _wp[:50])
+            # 2026-10-16：路径写错过（写成了「基本配置」，那里只有 AppID/AppSecret）→ 钉死正确路径
+            check("★ 白名单路径是「设置与开发 → 安全中心」而不是「基本配置」",
+                  "安全中心" in _wp and "基本配置" not in _wp, _wp[:60])
             check("含 ok_ip / changed_since_ok 字段", "ok_ip" in ip and "changed_since_ok" in ip)
             st, ip2 = adm.get("/api/system/public-ip")
             check("★ 第二次读走缓存（cached_sec 有值）", ip2.get("ip") == ip.get("ip"),

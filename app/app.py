@@ -1660,7 +1660,7 @@ def api_system_public_ip(request: Request, refresh: int = 0):
         "ok_ip": ok_ip,
         "changed_since_ok": bool(ok_ip and ip and ok_ip != ip),
         "whitelist_page": "https://mp.weixin.qq.com/",
-        "whitelist_path": "公众号后台 → 设置与开发 → 基本配置 → IP白名单（支持网段，如 106.85.0.0/16）",
+        "whitelist_path": "公众号后台 → 设置与开发 → 安全中心 → IP白名单（支持网段，如 106.85.0.0/16）",
     }
 
 
@@ -1734,7 +1734,7 @@ def api_system_status(request: Request, refresh: int = 0):
                 "stale": bool(lc.get("ts") and time.time() - lc["ts"] > _LLM_TTL)},
         "wechat": wx_out,
         "egress": {"ip": ip, "ok_ip": ok_ip, "changed_since_ok": changed,
-                   "whitelist_path": "公众号后台 → 设置与开发 → 基本配置 → IP白名单"},
+                   "whitelist_path": "公众号后台 → 设置与开发 → 安全中心 → IP白名单"},
         "account": acc_info,
         "schedule": sched,
     }
@@ -2626,7 +2626,7 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                     if ip_blocked:
                         notify.send("## 🚨 发布失败：IP 白名单拦截（40164）",
                                     "微信报 40164：本机公网 IP 不在公众号后台 IP 白名单，重试无效。\n"
-                                    "请到 mp.weixin.qq.com → 设置与开发 → 基本配置 → IP白名单 加上日志里的 IP。",
+                                    "请到 mp.weixin.qq.com → 设置与开发 → 安全中心 → IP白名单 加上日志里的 IP。",
                                     use_markdown=True)
                     elif hit_limit and not plan.get("limit_alerted"):
                         plan["limit_alerted"] = True
@@ -2769,7 +2769,7 @@ def _ip_watchdog():
                  f"**新 IP：{ip}**",
                  "",
                  "IP 白名单若未包含新 IP，定时发布会整批失败（40164）。",
-                 "请到 mp.weixin.qq.com → 设置与开发 → 基本配置 → IP白名单 更新",
+                 "请到 mp.weixin.qq.com → 设置与开发 → 安全中心 → IP白名单 更新",
                  "（支持 IP 段格式，如 106.85.0.0/16，加了网段就不用频繁改）。"])
     except Exception as e:
         logger.warning("IP 变更通知失败：%s", e)

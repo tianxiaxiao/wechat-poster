@@ -289,6 +289,9 @@ const READ_IPBAR = () => {
           /mp\.weixin\.qq\.com/.test(ib.mpHref) && ib.mpTarget === "_blank",
           `${ib.mpHref} target=${ib.mpTarget}`);
     check("★ 第一排 = 白名单填写路径（含「IP白名单」）", /IP白名单/.test(ib.note), ib.note.slice(0, 60));
+    // 2026-10-16：路径曾写错成「基本配置」（那里只有 AppID/AppSecret）→ 钉死「安全中心」
+    check("★ 路径是「设置与开发 → 安全中心」而非「基本配置」",
+          /安全中心/.test(ib.note) && !/基本配置/.test(ib.note), ib.note.slice(0, 60));
     check("★ 第二排 = 上次验证通过的 IP", /^上次验证通过的 IP：/.test(ib.note2.trim()), ib.note2.slice(0, 60));
     check("★ 两排文案不混在一起（第一排不含「上次验证通过」）", !/上次验证通过/.test(ib.note), ib.note.slice(0, 40));
     await shot(p, "si_03_ipbar.png", "#acct-modal .settings-panel");
