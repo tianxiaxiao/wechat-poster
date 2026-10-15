@@ -1216,6 +1216,111 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
     return {"ok": True}
 
 
+class AdminUserScheduleIn(BaseModel):
+    """管理员代管某用户每日定时的入参（只管定时，不动其模型/Key）。"""
+    schedule_enabled: bool = False
+    schedule_time: str = "10:00"
+    schedule_account_ids: list = []
+    schedule_product_id: int = 0
+
+
+@app.get("/api/admin/user-schedules")
+async def api_admin_user_schedules(request: Request):
+    """管理员：查看所有用户的每日定时（含每人可勾选的公众号范围、公众号/产品列表、全局兜底定时）。
+    前端据此渲染「🗓 定时总览」面板：一眼看全谁的定时开着、几点、发哪几个号、用哪款产品。"""
+    auth.need_role(request, "admin")
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.id).all()
+        accounts = db.query(Account).order_by(Account.id).all()
+        products = db_api.list_products(db)
+        acct_name = {a.id: a.name for a in accounts}
+        out = []
+        for u in users:
+            s = db_api.get_user_setting(u.id, db)
+            aids = []
+            if s and s.schedule_account_ids:
+                try:
+                    aids = [int(x) for x in json.loads(s.schedule_account_ids)]
+                except Exception:  # noqa: BLE001
+                    aids = []
+            # 该用户可被授权使用的号：自己创建的 + 系统共享(owner_id IS NULL)
+            allowed = sorted(a.id for a in accounts if a.owner_id is None or a.owner_id == u.id)
+            out.append({
+                "id": u.id,
+                "username": u.username,
+                "name": u.name or "",
+                "role": u.role,
+                "is_active": bool(getattr(u, "is_active", 1)),
+                "schedule_enabled": bool(s.schedule_enabled) if s else False,
+                "schedule_time": (s.schedule_time if s else "") or "10:00",
+                "schedule_account_ids": aids,
+                "schedule_product_id": (s.schedule_product_id if s else 0) or 0,
+                "schedule_last_run_date": (s.schedule_last_run_date if s else "") or "",
+                "allowed_account_ids": allowed,
+                "account_names": [acct_name.get(x, f"#{x}") for x in aids],
+                "product_name": next((p.name for p in products
+                                      if p.id == ((s.schedule_product_id if s else 0) or 0)), ""),
+                "llm_provider": (s.llm_provider if s else "") or "",
+                "llm_model": (s.llm_model if s else "") or "",
+                "has_own_key": bool(s.llm_api_key) if s else False,
+            })
+        return {
+            "users": out,
+            "accounts": [{"id": a.id, "name": a.name, "owner_id": a.owner_id} for a in accounts],
+            "products": [{"id": p.id, "name": p.name} for p in products],
+            # 全局兜底定时：仅当【无人启用个人定时】时才生效（向后兼容单人部署）
+            "global_fallback": {
+                "enabled": bool(SCHED_CFG.get("enabled")),
+                "time": SCHED_CFG.get("time", "10:00"),
+                "account_id": SCHED_CFG.get("account_id", 0),
+                "product_id": SCHED_CFG.get("product_id", 0),
+                "last_run_date": SCHED_CFG.get("last_run_date", ""),
+            },
+            "multi_user": len(users) > 1,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/admin/user-schedules/{uid}")
+async def api_admin_set_user_schedule(uid: int, body: AdminUserScheduleIn, request: Request):
+    """管理员代管：修改指定用户的每日定时。
+    ⚠️ 只能选【该用户自己创建的 + 系统共享】的公众号 —— 越权分配会被拒绝（保持多租户隔离不变）。"""
+    me = auth.need_role(request, "admin")
+    t = (body.schedule_time or "").strip()
+    if t and not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", t):
+        raise HTTPException(400, "定时时间格式应为 HH:MM，如 10:00")
+    try:
+        aids = [int(x) for x in (body.schedule_account_ids or [])]
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "schedule_account_ids 必须是数字列表")
+    db = SessionLocal()
+    try:
+        u = db.get(User, uid)
+        if not u:
+            raise HTTPException(404, "用户不存在")
+        uname = u.username
+        owned = {a.id for a in db_api.list_accounts_for_user(uid, False, db)}
+        bad = [x for x in aids if x not in owned]
+        if bad:
+            raise HTTPException(400, f"只能选该用户自己或系统共享的公众号，越权：{bad}")
+        db_api.upsert_user_setting(
+            uid, db=db,
+            schedule_enabled=1 if body.schedule_enabled else 0,
+            schedule_time=t or "10:00",
+            schedule_account_ids=json.dumps(aids, ensure_ascii=False),
+            schedule_product_id=int(body.schedule_product_id or 0),
+        )
+    finally:
+        db.close()
+    audit.audit(request, "schedule.admin",
+                f"代管用户「{uname}」每日定时：{'开启' if body.schedule_enabled else '关闭'}，"
+                f"每天 {t or '10:00'}，公众号 {aids or '默认'}，产品#{body.schedule_product_id or 0}",
+                user=me, level="warn")
+    return {"ok": True}
+
+
 def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     """按请求参数创建并启动后台 job（/api/run 与每日定时自动发布共用）。返回 job_id；参数不合法抛 HTTPException。"""
     # ---- 解析多主题 ----
@@ -1352,9 +1457,21 @@ class ScheduleIn(BaseModel):
     product_id: int = 0
 
 
+def _user_count() -> int:
+    """系统内用户总数（用于判断是否为「多用户部署」）。"""
+    db = SessionLocal()
+    try:
+        return db.query(User).count()
+    except Exception:  # noqa: BLE001
+        return 0
+    finally:
+        db.close()
+
+
 @app.get("/api/schedule")
 async def api_schedule_get():
-    """返回当前定时配置 + 下次触发时间文案"""
+    """返回当前全局定时配置 + 下次触发时间文案。
+    multi_user=True 表示多人部署 —— 前端据此隐藏「全局定时」老入口（改用每人独立的定时）。"""
     cfg = SCHED_CFG
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -1382,6 +1499,7 @@ async def api_schedule_get():
         "product_id": cfg.get("product_id", 0),
         "last_run_date": cfg.get("last_run_date", ""),
         "next_run": next_text,
+        "multi_user": _user_count() > 1,   # 多人部署 → 前端隐藏「全局定时」老入口
     }
 
 

@@ -117,6 +117,7 @@ button { line-height: 1.2; }
     <button id="gear-btn" class="gear-btn" type="button">⚙️ <span>模型设置</span></button>
     <button id="users-btn" class="gear-btn hidden" type="button">👥 <span>用户管理</span></button>
     <button id="audit-btn" class="gear-btn hidden" type="button">📜 <span>操作日志</span></button>
+    <button id="sched-admin-btn" class="gear-btn hidden" type="button">🗓 <span>定时总览</span></button>
   </div>
   <!-- 第三排：功能说明（小号字体，单行完整显示不换行） -->
   <p class="text-xs text-slate-500 mt-2.5 whitespace-nowrap overflow-hidden text-ellipsis">选产品 + 选公众号 → AI 生成对应宣传软文 → 自动发布。勾选「API 自动发布」= 免扫码全自动；不勾选 = 扫码发表。</p>
@@ -192,26 +193,33 @@ button { line-height: 1.2; }
       <span id="req-msg" class="text-xs text-slate-500 ml-1"></span>
     </div>
 
-    <!-- 每日定时自动发布 -->
+    <!-- 每日定时自动发布（多人部署时 #global-sched-row 整块隐藏，改用每人独立的「我的每日定时」） -->
     <div class="pt-2 pb-1 border-t border-dashed border-slate-200">
-      <div class="flex items-center flex-wrap gap-x-4 gap-y-1.5">
-        <label class="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
-          <input type="checkbox" id="sched_enable" class="w-4 h-4 text-emerald-600 rounded cursor-pointer" checked />
-          <span>⏰ 每日定时自动发布</span>
-        </label>
-        <label class="inline-flex items-center gap-1.5 text-sm text-slate-600 select-none">
-          每天
-          <input type="time" id="sched_time" value="10:00" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
-          开始
-        </label>
-        <span class="text-xs text-slate-400">到点自动发布「主题库全部主题 × 每主题 1 篇」，免扫码（API 自动发布）；每篇间隔 1 分钟（安全速率），单批最多 25 篇，通常一次就能发完</span>
+      <!-- 老「全局定时」入口：多人部署时隐藏（定时改为每人独立配置），避免与「我的每日定时」混淆 -->
+      <div id="global-sched-row">
+        <div class="flex items-center flex-wrap gap-x-4 gap-y-1.5">
+          <label class="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+            <input type="checkbox" id="sched_enable" class="w-4 h-4 text-emerald-600 rounded cursor-pointer" checked />
+            <span>⏰ 每日定时自动发布（全局）</span>
+          </label>
+          <label class="inline-flex items-center gap-1.5 text-sm text-slate-600 select-none">
+            每天
+            <input type="time" id="sched_time" value="10:00" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+            开始
+          </label>
+          <span class="text-xs text-slate-400">到点自动发布「主题库全部主题 × 每主题 1 篇」，免扫码（API 自动发布）；每篇间隔 1 分钟（安全速率），单批最多 25 篇，通常一次就能发完</span>
+        </div>
+        <div id="sched-next" class="text-xs text-emerald-600 mt-1.5 flex items-center gap-2 flex-wrap"></div>
       </div>
-      <div id="sched-next" class="text-xs text-emerald-600 mt-1.5 flex items-center gap-2 flex-wrap"></div>
+      <!-- 多人部署提示：默认隐藏，检测到多用户时顶替上面的全局定时显示 -->
+      <div id="global-sched-hint" class="hidden text-[11px] text-slate-500 mt-1">
+        🧑 多人部署：定时按【每人独立】管理 —— 请到右上「⚙️ 模型设置 → 我的每日定时」配置你自己的模型/Key + 勾选要发的公众号（可多选，同一批主题会同时发到每一个号）。
+        <span id="global-sched-hint-admin" class="hidden">管理员可点右上「🗓 定时总览」查看/代管所有用户的定时。</span>
+      </div>
       <div class="text-xs text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
         <span>💡 定时任务跑完会自动发通知；手动发布勾选上面「📲 完成后微信通知」即可。</span>
         <button type="button" id="notify-test-btn" class="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer">🔔 发送测试通知</button>
       </div>
-      <div class="text-[11px] text-slate-400 mt-1">🧑 多用户部署：每位用户请到右上「⚙️ 模型设置 → 我的每日定时」单独配置【自己的模型/Key + 勾选要发的公众号】，互不干扰；此处的「全局定时」仅作为无人单独配置时的兜底。</div>
     </div>
     <!-- 发布按钮：独占一行，宽度固定，位置恒定不乱跳 -->
     <button id="run-btn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 transition text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm">
@@ -450,6 +458,44 @@ button { line-height: 1.2; }
   </div>
 </div>
 
+<!-- ===== 定时总览 modal（仅管理员：查看 / 代管各用户每日定时） ===== -->
+<div id="sched-admin-modal" class="settings-modal hidden">
+  <div class="settings-panel" style="max-width:940px">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-lg font-bold text-slate-900">🗓 定时总览 · 各用户每日定时</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="sched-admin-modal">&times;</button>
+    </div>
+    <div class="text-[11px] text-slate-400 mb-2">
+      每位用户的定时互相独立：到点用【该用户自己的模型与 API Key】生成，并发到【TA 勾选的每一个公众号】。
+      管理员可在此查看并代管（保存会记入操作日志）。多人部署时主页老「全局定时」入口会自动隐藏。
+    </div>
+    <div id="sched-admin-list" class="overflow-auto space-y-2" style="max-height:52vh"></div>
+
+    <!-- 全局兜底定时：仅当无人启用个人定时时生效（单人部署兼容） -->
+    <div class="mt-3 pt-2.5 border-t border-dashed border-slate-200">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm font-semibold text-slate-700">🌐 全局兜底定时</span>
+        <label class="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+          <input type="checkbox" id="gb_sched_enable" class="w-3.5 h-3.5 text-emerald-600 rounded cursor-pointer" />
+          启用
+        </label>
+        <input type="time" id="gb_sched_time" value="10:00" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+        <button id="gb_sched_save" type="button" class="px-2.5 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700">保存</button>
+        <span class="text-[11px] text-slate-400">仅在【无人启用个人定时】时生效；多人部署建议保持关闭。</span>
+        <span id="gb_sched_msg" class="text-[11px] ml-auto"></span>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between mt-2.5">
+      <span id="sched-admin-msg" class="text-xs"></span>
+      <div class="flex gap-2">
+        <button id="sched-admin-refresh" type="button" class="px-3 py-1.5 text-xs bg-slate-200 hover:bg-slate-300 rounded">刷新</button>
+        <button type="button" class="px-3 py-1.5 text-xs bg-slate-200 hover:bg-slate-300 rounded" data-close="sched-admin-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ===== 修改我的密码 modal ===== -->
 <div id="pw-modal" class="settings-modal hidden">
   <div class="settings-panel" style="max-width:380px">
@@ -484,7 +530,12 @@ async function loadMe(){
   } catch (e) { return; }
   $('#cur-user').innerHTML = `<b class="text-slate-700">${esc(ME.name || ME.username)}</b>`
     + `<span class="text-slate-400">（${({admin:'管理员',editor:'编辑',viewer:'只读'})[ME.role] || ME.role}）</span>`;
-  if (ME.role === 'admin') { $('#users-btn')?.classList.remove('hidden'); $('#audit-btn')?.classList.remove('hidden'); }
+  if (ME.role === 'admin') {
+    $('#users-btn')?.classList.remove('hidden');
+    $('#audit-btn')?.classList.remove('hidden');
+    $('#sched-admin-btn')?.classList.remove('hidden');   // 定时总览（查看/代管各用户定时）
+    $('#global-sched-hint-admin')?.classList.remove('hidden');
+  }
   if (ME.role === 'viewer') {
     // 只读账号：隐藏所有写操作入口，避免点了才报 403
     document.querySelectorAll('#run-form button[type=submit], #run-btn').forEach(el => {
@@ -621,6 +672,109 @@ $('#au_q')?.addEventListener('keydown', e => { if (e.key === 'Enter') openAudit(
 $('#au_prev')?.addEventListener('click', () => { AU_OFFSET = Math.max(0, AU_OFFSET - AU_LIMIT); openAudit(false); });
 $('#au_next')?.addEventListener('click', () => { AU_OFFSET += AU_LIMIT; openAudit(false); });
 $('#au_export')?.addEventListener('click', () => { location.href = '/api/audit/export.csv'; });
+
+// ---- 定时总览（管理员：查看 / 代管各用户每日定时） ----
+const SA_ROLE = { admin: '管理员', editor: '编辑', viewer: '只读' };
+// keepMsg=true：保存后自动刷新时保留「✅ 已保存」提示，不让提示一闪而过
+async function openSchedAdmin(keepMsg) {
+  openModal('sched-admin-modal');
+  const el = $('#sched-admin-list');
+  el.innerHTML = '<div class="text-xs text-slate-400 p-2">加载中…</div>';
+  let d;
+  try {
+    const r = await fetch('/api/admin/user-schedules');
+    if (!r.ok) { el.innerHTML = '<div class="text-xs text-rose-600 p-2">加载失败（需要管理员权限）</div>'; return; }
+    d = await r.json();
+  } catch (e) { el.innerHTML = '<div class="text-xs text-rose-600 p-2">加载失败：' + esc(e.message) + '</div>'; return; }
+  const gb = d.global_fallback || {};
+  $('#gb_sched_enable').checked = !!gb.enabled;
+  $('#gb_sched_time').value = gb.time || '10:00';
+  if (!keepMsg) $('#sched-admin-msg').textContent = '';
+
+  const users = d.users || [];
+  el.innerHTML = users.length ? users.map(u => {
+    const allowed = new Set(u.allowed_account_ids || []);
+    const sel = new Set(u.schedule_account_ids || []);
+    const boxes = (d.accounts || []).length
+      ? (d.accounts || []).map(a => {
+          const on = sel.has(a.id), can = allowed.has(a.id);
+          const tag = a.owner_id == null ? '' : ' <span class="text-[10px] text-slate-400">(他人)</span>';
+          return `<label class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border cursor-pointer select-none text-[11px] leading-4 ${on ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'} ${can ? '' : 'opacity-45'}" title="${can ? '' : '该号不属于此用户，不可分配'}">
+            <input type="checkbox" class="sa-acct-cb w-3 h-3 accent-blue-600" data-id="${a.id}" ${on ? 'checked' : ''} ${can ? '' : 'disabled'} />${esc(a.name)}${tag}</label>`;
+        }).join('')
+      : '<span class="text-[11px] text-slate-400">（暂无公众号，请先到「📱 公众号」添加）</span>';
+    const prodOpts = (d.products || []).length
+      ? (d.products || []).map(p => `<option value="${p.id}" ${p.id === u.schedule_product_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
+      : '<option value="0">（默认第一个产品）</option>';
+    const llm = u.llm_provider
+      ? `${esc(u.llm_provider)}${u.llm_model ? ' · ' + esc(u.llm_model) : ''}${u.has_own_key ? ' · 自有 Key' : ' · 未设 Key'}`
+      : '<span class="text-slate-400">未配置（用服务端默认）</span>';
+    return `<div class="p-2 border rounded ${u.schedule_enabled ? 'border-emerald-300 bg-emerald-50/40' : 'border-slate-200'}" data-uid="${u.id}">
+      <div class="flex items-center gap-2 flex-wrap">
+        <div style="min-width:118px">
+          <div class="text-xs font-semibold text-slate-700">${esc(u.username)}${u.name ? ' · ' + esc(u.name) : ''}</div>
+          <div class="text-[10px] text-slate-400">${esc(SA_ROLE[u.role] || u.role)}${u.is_active ? '' : ' · 已停用'}</div>
+        </div>
+        <label class="inline-flex items-center gap-1 text-xs text-slate-600 cursor-pointer select-none">
+          <input type="checkbox" class="sa-enable w-3.5 h-3.5 text-emerald-600 rounded cursor-pointer" ${u.schedule_enabled ? 'checked' : ''} /> 开启定时
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none">
+          每天 <input type="time" class="sa-time border border-slate-300 rounded px-1 py-0.5 text-xs" value="${esc(u.schedule_time || '10:00')}" /> 开始
+        </label>
+        <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none">
+          产品 <select class="sa-prod border border-slate-300 rounded px-1 py-0.5 text-xs">${prodOpts}</select>
+        </label>
+        <button type="button" class="sa-save px-2.5 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700">保存</button>
+        <span class="text-[10px] text-slate-400">今日已跑 ${esc(u.schedule_last_run_date || '—')} · 模型 ${llm}</span>
+      </div>
+      <div class="text-[10px] text-slate-400 mt-1">发布到（可多选，到点同时发到每一个号）：</div>
+      <div class="flex flex-wrap gap-1 mt-0.5">${boxes}</div>
+    </div>`;
+  }).join('') : '<div class="text-xs text-slate-400 p-2">暂无用户</div>';
+
+  el.querySelectorAll('[data-uid]').forEach(row => {
+    const btn = row.querySelector('.sa-save');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const aids = Array.from(row.querySelectorAll('.sa-acct-cb:checked')).map(c => parseInt(c.dataset.id));
+      const payload = {
+        schedule_enabled: row.querySelector('.sa-enable').checked,
+        schedule_time: row.querySelector('.sa-time').value || '10:00',
+        schedule_account_ids: aids,
+        schedule_product_id: parseInt(row.querySelector('.sa-prod').value) || 0,
+      };
+      btn.disabled = true; btn.textContent = '保存中…';
+      const m = $('#sched-admin-msg');
+      try {
+        const rr = await fetch('/api/admin/user-schedules/' + row.dataset.uid,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const dd = await rr.json().catch(() => ({}));
+        m.textContent = rr.ok ? '✅ 已保存该用户定时' : ('❌ ' + (dd.detail || '保存失败'));
+        m.className = rr.ok ? 'text-xs text-green-600' : 'text-xs text-rose-600';
+        if (rr.ok) setTimeout(() => openSchedAdmin(true), 450);   // 刷新但保留成功提示
+      } catch (e) {
+        m.textContent = '❌ 保存失败：' + e.message; m.className = 'text-xs text-rose-600';
+      }
+      btn.disabled = false; btn.textContent = '保存';
+    });
+  });
+}
+// ⚠️ 必须包一层：直接传 openSchedAdmin 会把 MouseEvent 当成 keepMsg（恒为真）导致提示不清除
+$('#sched-admin-btn')?.addEventListener('click', () => openSchedAdmin());
+$('#sched-admin-refresh')?.addEventListener('click', () => openSchedAdmin());
+$('#sched-admin-modal')?.addEventListener('click', e => { if (e.target.id === 'sched-admin-modal') closeModal('sched-admin-modal'); });
+// 全局兜底定时（复用 /api/schedule；仅在无人启用个人定时时生效）
+$('#gb_sched_save')?.addEventListener('click', async () => {
+  const m = $('#gb_sched_msg');
+  try {
+    const r = await fetch('/api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: $('#gb_sched_enable').checked, time: $('#gb_sched_time').value || '10:00',
+                             account_id: 0, product_id: 0 }) });
+    const d = await r.json().catch(() => ({}));
+    m.textContent = r.ok ? '✅ 已保存' : ('❌ ' + (d.detail || '保存失败'));
+    m.className = r.ok ? 'text-[11px] text-green-600' : 'text-[11px] text-rose-600';
+  } catch (e) { m.textContent = '❌ ' + e.message; m.className = 'text-[11px] text-rose-600'; }
+});
 
 loadMe();
 
@@ -1427,6 +1581,13 @@ async function loadSchedule() {
     const r = await fetch('/api/schedule');
     if (!r.ok) return;
     const d = await r.json();
+    // 多人部署：隐藏老「全局定时」入口 —— 定时改为每人独立配置
+    // （本人 → 右上「⚙️ 模型设置 → 我的每日定时」；管理员代管 → 右上「🗓 定时总览」）
+    if (d.multi_user) {
+      $('#global-sched-row')?.classList.add('hidden');
+      $('#global-sched-hint')?.classList.remove('hidden');
+      return;
+    }
     $('#sched_enable').checked = !!d.enabled;
     $('#sched_time').value = d.time || '10:00';
     renderSchedNext(d);
