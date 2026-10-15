@@ -51,6 +51,9 @@ class Product(Base):
     name = Column(String(64), nullable=False)  # 产品名，如"百秘一梳"、"xxx护肤品"
     intro = Column(Text, nullable=False, default="")  # 产品介绍/卖点/品牌故事
     style = Column(String(255), nullable=False, default="")  # 可选的风格色板提示
+    # 归属用户：NULL = 公共素材（所有人可见、仅管理员可改）；否则仅本人 + 管理员可见可改。
+    # 管理员新建的自动落 NULL（= 作为团队公共素材）；普通用户新建的归自己（2026-10-16 新增）
+    owner_id = Column(Integer, index=True)
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
 
 
@@ -63,6 +66,9 @@ class Topic(Base):
     # 归属产品：>0 只在该产品下出现；0 = 通用（所有产品都能看到）。
     # 用途：把「保健功效类主题」绑到木梳，就不会出现在美食产品下（2026-10-16 新增）。
     product_id = Column(Integer, default=0, index=True)
+    # 归属用户：NULL = 公共主题（所有人可见、仅管理员可改）；否则仅本人 + 管理员可见可改。
+    # 管理员新建的自动落 NULL；普通用户新建的归自己（2026-10-16 新增）
+    owner_id = Column(Integer, index=True)
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
 
 
@@ -175,6 +181,15 @@ def _migrate_schema():
                 # 旧库已有主题一律视为「通用(0)」→ 所有产品仍可见，不会突然消失
                 c.execute(text("ALTER TABLE topics ADD COLUMN product_id INTEGER DEFAULT 0"))
                 c.commit()
+            if cols3 and "owner_id" not in cols3:
+                # 主题归属：旧数据留 NULL = 公共主题（所有人可见），不会突然消失
+                c.execute(text("ALTER TABLE topics ADD COLUMN owner_id INTEGER"))
+                c.commit()
+            cols4 = [r[1] for r in c.execute(text("PRAGMA table_info(products)")).fetchall()]
+            if cols4 and "owner_id" not in cols4:
+                # 产品归属：旧数据留 NULL = 公共产品（所有人可见），不会突然消失
+                c.execute(text("ALTER TABLE products ADD COLUMN owner_id INTEGER"))
+                c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")
 
@@ -205,6 +220,22 @@ def upsert_user_setting(user_id: int, db: Session = None, **fields) -> UserSetti
     finally:
         if db is None:
             s.close()
+
+
+def owner_scope_filter(model, user_id: int, is_admin: bool):
+    """给「有归属(owner_id)」的表生成可见性过滤条件：
+    管理员 → None（不加条件，看全部）；其余用户 → 只看【自己创建的 + 公共(NULL)】。"""
+    if is_admin:
+        return None
+    return (model.owner_id == user_id) | (model.owner_id.is_(None))
+
+
+def can_edit_owned(row, user_id: int, is_admin: bool) -> bool:
+    """能否修改/删除某条有归属的记录：
+    管理员 → 可以；其余用户 → 只有【自己创建的】可改（公共 NULL 也不可改，避免误改公共素材）。"""
+    if is_admin:
+        return True
+    return getattr(row, "owner_id", None) == user_id
 
 
 def list_accounts_for_user(user_id: int, is_admin: bool, db: Session = None):

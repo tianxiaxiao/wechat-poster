@@ -276,6 +276,34 @@ async function login(page, user, pw) {
     const hintAll = await page.$eval("#topic-sel-hint", el => el.textContent || "");
     check("「全选」后计数恢复", hintAll.includes(`共 ${nBefore} 个主题`), hintAll);
 
+    // ---- 非管理员视角：非自己创建的主题显示「🔒 只读」、无编辑/删除、勾选框禁用 ----
+    console.log("\n[G] 非管理员视角：只有自己创建的可改");
+    await page.evaluate(async () => {
+      await fetch("/api/users", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: "edX", password: "Passw0rd123", role: "editor" }) });
+    });
+    const ctxX = await browser.newContext();
+    const pageX = await ctxX.newPage();
+    await login(pageX, "edX", "Passw0rd123");
+    await pageX.$eval("#topic-btn", el => el.click());
+    await pageX.waitForFunction(
+      () => document.querySelectorAll("#topic-list-mgr [id^=row-topic-]").length > 0, { timeout: 10000 });
+    await pageX.waitForTimeout(500);
+    const vx = await pageX.evaluate(() => {
+      const rows = [...document.querySelectorAll("#topic-list-mgr [id^=row-topic-]")];
+      const txt = (r) => r.textContent || "";
+      return {
+        total: rows.length,
+        editBtns: rows.filter(r => txt(r).includes("编辑")).length,
+        lockRows: rows.filter(r => txt(r).includes("只读")).length,
+        disabledCb: rows.filter(r => r.querySelector('input[type="checkbox"][disabled]')).length,
+      };
+    });
+    check("editor 能看到公共主题（都不是自己建的）", vx.total > 0, `共${vx.total}行`);
+    check("editor 看不到「编辑」按钮（公共主题不可改）★核心", vx.editBtns === 0, `有编辑按钮 ${vx.editBtns} 行`);
+    check("editor 每行显示「🔒 只读」", vx.lockRows === vx.total, `${vx.lockRows}/${vx.total}`);
+    check("editor 的勾选框被禁用（不能归类公共主题）", vx.disabledCb === vx.total, `${vx.disabledCb}/${vx.total}`);
+
     console.log("\n" + "=".repeat(56));
     console.log(`=== 渲染断言：通过 ${pass} / 共 ${pass + fail}；失败 ${fail} ===`);
     process.exitCode = fail === 0 ? 0 : 1;

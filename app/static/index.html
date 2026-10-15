@@ -1502,14 +1502,23 @@ function renderTopicMgr() {
       const badge = t.product_id
         ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-blue-50 text-blue-700 border border-blue-200">${esc(prodName(t.product_id))}</span>`
         : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">通用</span>`;
+      // 归属者标签：公共 / 他人（自己建的不标，默认就是自己的）
+      const own = t.shared
+        ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">公共</span>`
+        : (t.mine ? '' : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-amber-50 text-amber-700 border border-amber-200">他人</span>`);
+      // 非自己创建：勾选框禁用、不显示编辑/删除（后端同样 403 兜底）
+      const cb = t.can_edit
+        ? `<input type="checkbox" class="topic-row-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-id="${t.id}" data-pid="${pid}" title="勾选后可批量归类" />`
+        : `<input type="checkbox" class="w-3.5 h-3.5 shrink-0 opacity-40" disabled title="不是你创建的主题，无权归类/修改" />`;
+      const acts = t.can_edit
+        ? `<button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
+           <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>`
+        : `<span class="text-[10px] text-slate-400" title="不是你创建的主题，无权修改/删除">🔒 只读</span>`;
       return `<div id="row-topic-${t.id}" class="flex items-center gap-2 bg-white border border-slate-200 rounded px-2.5 py-1.5">
-      <input type="checkbox" class="topic-row-cb w-3.5 h-3.5 accent-blue-600 shrink-0 cursor-pointer" data-id="${t.id}" data-pid="${pid}" title="勾选后可批量归类" />
-      <div class="flex-1 min-w-0"><div class="text-sm font-medium truncate">${esc(t.name)}${badge}</div>
+      ${cb}
+      <div class="flex-1 min-w-0"><div class="text-sm font-medium truncate">${esc(t.name)}${badge}${own}</div>
         <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
-      <div class="flex-shrink-0 flex items-center gap-1 ml-2">
-        <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
-        <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>
-      </div>
+      <div class="flex-shrink-0 flex items-center gap-1 ml-2">${acts}</div>
     </div>`;
     }).join('');
     return `<div data-group="${pid}">
@@ -1695,15 +1704,25 @@ $('#account_id').addEventListener('change', () => { $('#author').value = ''; syn
 function renderProdList() {
   const el = $('#prod-list');
   if (!PRODUCTS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无产品，请在下方添加。</div>'; return; }
-  el.innerHTML = PRODUCTS.map(p => `<div id="row-prod-${p.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
-    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(p.name)}</div>
+  el.innerHTML = PRODUCTS.map(p => {
+    // 归属：我创建的 / 公共（管理员建的，全员可用但只有管理员能改）/ 他人（仅管理员看得见）
+    const badge = p.mine
+      ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-emerald-50 text-emerald-700 border border-emerald-200">我创建的</span>`
+      : (p.shared
+        ? `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-slate-100 text-slate-500 border border-slate-200">公共</span>`
+        : `<span class="ml-1 text-[10px] px-1.5 py-[1px] rounded bg-amber-50 text-amber-700 border border-amber-200">他人</span>`);
+    // 非自己创建 → 不显示编辑/删除（前端隐藏；后端也会 403 兜底）
+    const acts = p.can_edit
+      ? `<button class="text-xs text-blue-600 hover:text-blue-800" onclick="editProductRow(${p.id})">编辑</button>
+         <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delProduct(${p.id})">删除</button>`
+      : `<span class="text-[10px] text-slate-400" title="不是你创建的，无权修改/删除">🔒 只读</span>`;
+    return `<div id="row-prod-${p.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(p.name)}${badge}</div>
       <div class="text-xs text-slate-500 truncate">${esc((p.intro||'').slice(0,80))}</div>
       ${p.style ? `<div class="text-xs text-amber-600 truncate mt-0.5">✍️ 写作要求：${esc((p.style||'').replace(/\s+/g,' ').slice(0,70))}</div>` : ''}</div>
-    <div class="flex-shrink-0 flex items-center gap-1 ml-2">
-      <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editProductRow(${p.id})">编辑</button>
-      <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delProduct(${p.id})">删除</button>
-    </div>
-  </div>`).join('');
+    <div class="flex-shrink-0 flex items-center gap-1 ml-2">${acts}</div>
+  </div>`;
+  }).join('');
 }
 function editProductRow(id) {
   const p = PRODUCTS.find(x => x.id === id); if (!p) return;

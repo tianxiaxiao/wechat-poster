@@ -965,11 +965,28 @@ class ProductIn(BaseModel):
 
 
 # ========== 产品库 CRUD ==========
+# 归属规则（2026-10-16）：
+#   · owner_id = NULL → 公共素材：所有人可见；**只有管理员能改删**（防误改公共内容）
+#   · owner_id = 某人 → 私有：仅本人 + 管理员可见可改删
+#   · 管理员新建 → 自动落 NULL（作为团队公共素材）；普通用户新建 → 归自己
 @app.get("/api/products")
-async def list_products_api():
+async def list_products_api(request: Request):
+    """产品列表：管理员看全部；其余用户只看【自己创建的 + 公共(NULL)】。
+    返回 mine / shared / can_edit 供前端决定是否显示「编辑 / 删除」。"""
+    me = auth.need_login(request)
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
-        return [{"id": p.id, "name": p.name, "intro": p.intro, "style": p.style} for p in db.query(Product).order_by(Product.id).all()]
+        q = db.query(Product).order_by(Product.id)
+        cond = db_api.owner_scope_filter(Product, me["id"], is_admin)
+        if cond is not None:
+            q = q.filter(cond)
+        return [{"id": p.id, "name": p.name, "intro": p.intro, "style": p.style,
+                 "owner_id": p.owner_id,
+                 "mine": (p.owner_id == me["id"]),
+                 "shared": (p.owner_id is None),
+                 "can_edit": db_api.can_edit_owned(p, me["id"], is_admin)}
+                for p in q.all()]
     finally:
         db.close()
 
@@ -979,11 +996,15 @@ async def add_product_api(p: ProductIn, request: Request):
     me = auth.need_role(request, "editor")
     if not p.name.strip():
         raise HTTPException(400, "产品名不能为空")
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
-        prod = Product(name=p.name.strip(), intro=p.intro.strip(), style=p.style.strip())
+        # 管理员新建 → 公共素材（全团队可用）；普通用户新建 → 归自己
+        prod = Product(name=p.name.strip(), intro=p.intro.strip(), style=p.style.strip(),
+                       owner_id=(None if is_admin else me["id"]))
         db.add(prod); db.commit(); db.refresh(prod)
-        audit.audit(request, "product.create", f"新增产品「{prod.name}」", user=me)
+        audit.audit(request, "product.create",
+                    f"新增产品「{prod.name}」（{'公共' if prod.owner_id is None else '私有'}）", user=me)
         return {"id": prod.id, "name": prod.name}
     finally:
         db.close()
@@ -992,6 +1013,7 @@ async def add_product_api(p: ProductIn, request: Request):
 @app.put("/api/products/{pid}")
 async def edit_product_api(pid: int, p: ProductIn, request: Request):
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     if not p.name.strip():
         raise HTTPException(400, "产品名不能为空")
     db = SessionLocal()
@@ -999,6 +1021,8 @@ async def edit_product_api(pid: int, p: ProductIn, request: Request):
         prod = db.query(Product).filter(Product.id == pid).first()
         if not prod:
             raise HTTPException(404, "产品不存在")
+        if not db_api.can_edit_owned(prod, me["id"], is_admin):
+            raise HTTPException(403, "该产品不是你创建的，无权修改（公共产品请让管理员改）")
         prod.name = p.name.strip()
         prod.intro = p.intro.strip()
         prod.style = p.style.strip()
@@ -1012,10 +1036,13 @@ async def edit_product_api(pid: int, p: ProductIn, request: Request):
 @app.delete("/api/products/{pid}")
 async def del_product_api(pid: int, request: Request):
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
         prod = db.query(Product).filter(Product.id == pid).first()
         if prod:
+            if not db_api.can_edit_owned(prod, me["id"], is_admin):
+                raise HTTPException(403, "该产品不是你创建的，无权删除（公共产品请让管理员删）")
             nm = prod.name
             db.delete(prod); db.commit()
             audit.audit(request, "product.delete", f"删除产品「{nm}」", user=me, level="warn")
@@ -1034,16 +1061,27 @@ def _product_name(db, pid: int) -> str:
 
 
 @app.get("/api/topics")
-async def list_topics_api(product_id: int = -1):
+async def list_topics_api(request: Request, product_id: int = -1):
     """主题列表。product_id ≥ 0 时只返回【该产品专属 + 通用(0)】的主题
-    —— 前端选产品后据此过滤，避免美食产品看到保健主题；不传则返回全部（主题库管理页用）。"""
+    —— 前端选产品后据此过滤，避免美食产品看到保健主题；不传则返回全部（主题库管理页用）。
+    可见性：管理员看全部；其余用户只看【自己创建的 + 公共(NULL)】。"""
+    me = auth.need_login(request)
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
         q = db.query(Topic).order_by(Topic.id)
         if product_id >= 0:
             q = q.filter((Topic.product_id == product_id) | (Topic.product_id == 0))
+        cond = db_api.owner_scope_filter(Topic, me["id"], is_admin)
+        if cond is not None:
+            q = q.filter(cond)
         return [{"id": t.id, "name": t.name, "desc": t.desc,
-                 "product_id": (t.product_id or 0)} for t in q.all()]
+                 "product_id": (t.product_id or 0),
+                 "owner_id": t.owner_id,
+                 "mine": (t.owner_id == me["id"]),
+                 "shared": (t.owner_id is None),
+                 "can_edit": db_api.can_edit_owned(t, me["id"], is_admin)}
+                for t in q.all()]
     finally:
         db.close()
 
@@ -1057,17 +1095,28 @@ class TopicIn(BaseModel):
 @app.post("/api/topics")
 async def add_topic_api(t: TopicIn, request: Request):
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     if not t.name.strip():
         raise HTTPException(400, "主题名不能为空")
     db = SessionLocal()
     try:
-        if db.query(Topic).filter(Topic.name == t.name.strip()).first():
-            raise HTTPException(400, "主题已存在")
+        # 重名校验只在【自己可见范围】内做：不同用户的私有主题允许同名
+        dup = db.query(Topic).filter(Topic.name == t.name.strip())
+        cond = db_api.owner_scope_filter(Topic, me["id"], is_admin)
+        if cond is not None:
+            dup = dup.filter(cond)
+        if dup.first():
+            raise HTTPException(400, "主题已存在（你自己或公共主题里已有同名）")
         pname = _product_name(db, int(t.product_id or 0))
-        tp = Topic(name=t.name.strip(), desc=t.desc.strip(), product_id=int(t.product_id or 0))
+        # 管理员新建 → 公共主题（全团队可用）；普通用户新建 → 归自己
+        tp = Topic(name=t.name.strip(), desc=t.desc.strip(), product_id=int(t.product_id or 0),
+                   owner_id=(None if is_admin else me["id"]))
         db.add(tp); db.commit(); db.refresh(tp)
-        audit.audit(request, "topic.create", f"新增主题「{tp.name}」（归属：{pname}）", user=me)
-        return {"id": tp.id, "name": tp.name, "product_id": tp.product_id or 0}
+        audit.audit(request, "topic.create",
+                    f"新增主题「{tp.name}」（归属产品：{pname}；"
+                    f"{'公共' if tp.owner_id is None else '私有'}）", user=me)
+        return {"id": tp.id, "name": tp.name, "product_id": tp.product_id or 0,
+                "owner_id": tp.owner_id}
     finally:
         db.close()
 
@@ -1075,6 +1124,7 @@ async def add_topic_api(t: TopicIn, request: Request):
 @app.put("/api/topics/{tid}")
 async def edit_topic_api(tid: int, t: TopicIn, request: Request):
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     if not t.name.strip():
         raise HTTPException(400, "主题名不能为空")
     db = SessionLocal()
@@ -1082,8 +1132,13 @@ async def edit_topic_api(tid: int, t: TopicIn, request: Request):
         tp = db.query(Topic).filter(Topic.id == tid).first()
         if not tp:
             raise HTTPException(404, "主题不存在")
-        dup = db.query(Topic).filter(Topic.name == t.name.strip(), Topic.id != tid).first()
-        if dup:
+        if not db_api.can_edit_owned(tp, me["id"], is_admin):
+            raise HTTPException(403, "该主题不是你创建的，无权修改（公共主题请让管理员改）")
+        dup = db.query(Topic).filter(Topic.name == t.name.strip(), Topic.id != tid)
+        cond = db_api.owner_scope_filter(Topic, me["id"], is_admin)
+        if cond is not None:
+            dup = dup.filter(cond)
+        if dup.first():
             raise HTTPException(400, "已有同名主题")
         tp.name = t.name.strip()
         tp.desc = t.desc.strip()
@@ -1106,6 +1161,7 @@ async def bulk_assign_topics(body: TopicBulkAssignIn, request: Request):
     """批量把多条主题归到同一个产品（product_id=0 → 设为通用）。
     主题库管理页的「批量归类」用它，避免逐条 PUT 发 N 个请求。"""
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     try:
         ids = [int(x) for x in (body.ids or [])]
     except Exception:  # noqa: BLE001
@@ -1118,15 +1174,22 @@ async def bulk_assign_topics(body: TopicBulkAssignIn, request: Request):
         rows = db.query(Topic).filter(Topic.id.in_(ids)).all()
         if not rows:
             raise HTTPException(404, "未找到这些主题")
-        for t in rows:
+        # 只归类有权限的：非管理员只能动自己创建的主题（公共/他人的会被跳过）
+        allowed = [t for t in rows if db_api.can_edit_owned(t, me["id"], is_admin)]
+        if not allowed:
+            raise HTTPException(403, "所选主题都不是你创建的，无权归类（公共主题请让管理员改）")
+        for t in allowed:
             t.product_id = pid
         db.commit()
-        n = len(rows)
+        n = len(allowed)
+        skipped = len(rows) - n
         pname = _product_name(db, pid)
         audit.audit(request, "topic.bulk_assign",
-                    f"批量归类 {n} 个主题 → 「{pname}」（#{','.join(str(t.id) for t in rows)[:80]}）",
+                    f"批量归类 {n} 个主题 → 「{pname}」"
+                    + (f"（跳过无权限 {skipped} 个）" if skipped else "")
+                    + f"（#{','.join(str(t.id) for t in allowed)[:80]}）",
                     user=me, level="warn")
-        return {"ok": True, "updated": n, "product_id": pid}
+        return {"ok": True, "updated": n, "skipped": skipped, "product_id": pid}
     finally:
         db.close()
 
@@ -1134,10 +1197,13 @@ async def bulk_assign_topics(body: TopicBulkAssignIn, request: Request):
 @app.delete("/api/topics/{tid}")
 async def del_topic_api(tid: int, request: Request):
     me = auth.need_role(request, "editor")
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
         tp = db.query(Topic).filter(Topic.id == tid).first()
         if tp:
+            if not db_api.can_edit_owned(tp, me["id"], is_admin):
+                raise HTTPException(403, "该主题不是你创建的，无权删除（公共主题请让管理员删）")
             nm = tp.name
             db.delete(tp); db.commit()
             audit.audit(request, "topic.delete", f"删除主题「{nm}」", user=me, level="warn")
@@ -1433,6 +1499,12 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     if req.product_id:
         prod = db.get(Product, req.product_id)
         if prod:
+            # 与目标公众号一致的限制：只能用【自己创建的 + 公共(NULL)】产品，管理员不限
+            if operator:
+                _admin = operator["role"] == "admin"
+                if not (_admin or prod.owner_id is None or prod.owner_id == operator["id"]):
+                    db.close()
+                    raise HTTPException(403, "无权使用该产品（只能选你自己创建的或公共产品）")
             product_name, product_intro, product_style = prod.name, prod.intro, (prod.style or "")
     account = None
     if req.account_id:
