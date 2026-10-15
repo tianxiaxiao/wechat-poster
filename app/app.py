@@ -187,6 +187,11 @@ def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
     # DeepSeek 临时故障（如 503 Service too busy）把后续篇全部判死。
     if not _llm_wait_ready(job, log_sink):
         raise RuntimeError("LLM 不可用（探活超时或鉴权失败），本篇生成中止")
+    # 本地/自建模型（ollama / openai_compat / 局域网或自建域名）→ 逐篇生成：一次只请求 1 篇。
+    # 在任务日志里明示，便于与云端模型的批量生成区分、排查"生成不出/响应慢"。
+    if count > 1 and llm.is_local_llm(job.get("provider"), job.get("base_url")):
+        log_sink.append(f"  🔧 本地/自建模型：『{topic}』{count} 篇将【逐篇生成】"
+                        f"（每次只请求 1 篇，避免一次要多篇导致响应不及时/超时/截断）")
     items = []
     for _try in range(3):   # 生成中途遇服务故障 → 等待恢复后重试（最多 3 次尝试）
         try:

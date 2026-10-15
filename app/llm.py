@@ -8,6 +8,7 @@ LLM 生成器 — 支持多种 OpenAI 兼容 provider
     llm.generate_articles(topic, count, brand=..., extra_hint=..., provider="ollama", model="qwen2.5:7b")
 """
 import os
+import re
 import json
 import logging
 from typing import List, Dict, Optional
@@ -254,6 +255,49 @@ def _make_messages(product: str, product_intro: str, topic: str, count: int,
 # JSON 不完整导致整批解析失败。count 较大时分批调用，批内失败自动降级逐篇，尽量保住能生成的文章。
 _MAX_PER_CALL = 3
 
+# ---- 本地 / 自建大模型：强制「一次只生成 1 篇」（2026-10-15 修正）----
+# 背景：本地/自建模型（qwen.dadaobo.com 网关、局域网 llama.cpp/vLLM、Ollama）单篇就要十几秒起，
+# 且输出 token 受限。一次要 2~3 篇 → 极易超 max_tokens 被截断、JSON 不完整，
+# 或干脆超过 LLM_TIMEOUT 无响应（表现为「生成不出」）。故这类模型一律逐篇串行。
+# 判定依据（满足任一即是）：provider 为 ollama/openai_compat；或 base_url 指向
+# localhost / 内网 IP 段 / 自建域名（LOCAL_LLM_HOSTS，逗号分隔，默认含本项目 qwen 网关域名）。
+_INTRANET_RE = re.compile(
+    r"://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|"
+    r"10\.\d{1,3}\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)",
+    re.I)
+_LOCAL_LLM_HOSTS = tuple(
+    h.strip().lower()
+    for h in os.getenv("LOCAL_LLM_HOSTS", "dadaobo.com").split(",")
+    if h.strip())
+
+
+def is_local_llm(provider: str, base_url: str = "") -> bool:
+    """是否本地 / 自建大模型（这类模型必须逐篇生成）。"""
+    p = (provider or "").strip().lower()
+    if p in ("ollama", "openai_compat"):
+        return True
+    u = (base_url or "").strip().lower()
+    if not u:
+        return False
+    if _INTRANET_RE.search(u):
+        return True
+    return any(h in u for h in _LOCAL_LLM_HOSTS)
+
+
+def plan_batches(count: int, provider: str, base_url: str = "") -> List[int]:
+    """规划「每次 LLM 调用生成几篇」：
+    · 本地/自建模型 → 每批 1 篇（逐篇串行，一篇一篇生成直到全部完成）
+    · 云端模型     → 每批最多 _MAX_PER_CALL 篇（原行为，省请求）
+    返回每批篇数列表，如 count=3 时 本地→[1,1,1]、云端→[3]；count=5 云端→[3,2]。"""
+    max_per = 1 if is_local_llm(provider, base_url) else _MAX_PER_CALL
+    sizes: List[int] = []
+    remaining = max(int(count), 1)
+    while remaining > 0:
+        n = min(max_per, remaining)
+        sizes.append(n)
+        remaining -= n
+    return sizes
+
 
 def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
                       extra_hint: str = "",
@@ -269,20 +313,15 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
     product_name/product_intro：所选产品的名称与介绍（来自产品库）。未给时用 brand/默认品牌素材兜底。
     product_style：产品库里的"写作要求"（标题/钩子/人群/禁忌等），作为最高优先级注入提示词。
     history_titles：历史已发布标题列表 → 注入提示词禁止雷同（配合 dedup.py 后过滤层做两层防撞车）。
-    count 大于 _MAX_PER_CALL 时自动分批调用（每批 ≤3 篇），防止单次输出超长被截断；
+    分批策略（见 plan_batches）：
+      · 本地/自建模型（ollama / openai_compat / 内网或自建域名）→ 每批 1 篇，逐篇串行生成，
+        一次只让模型写一篇，避免「一次要 N 篇」导致响应不及时 / 超时 / 生成不出；
+      · 云端模型（deepseek 等）→ 每批最多 _MAX_PER_CALL 篇，同时防止单次输出超长被截断。
     某批失败会自动降级为逐篇生成，尽量不因单次超长输出而丢掉整批。
     """
     out: List[Dict] = []
     errors: List[str] = []
-    batch_sizes = []
-    # OpenAI 兼容/本地大模型（如 llama.cpp 上的 Qwen3）单篇就很慢且输出 token 受限，
-    # 一次塞多篇既慢又易超 max_tokens 被截断 → 每批只生成 1 篇，尽量保住质量与完整 JSON。
-    max_per = 1 if provider == "openai_compat" else _MAX_PER_CALL
-    remaining = max(count, 1)
-    while remaining > 0:
-        n = min(max_per, remaining)
-        batch_sizes.append(n)
-        remaining -= n
+    batch_sizes = plan_batches(count, provider, base_url)
     for bi, n in enumerate(batch_sizes):
         hint = extra_hint or ""
         if out:
