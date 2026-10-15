@@ -76,6 +76,7 @@ class Article(Base):
     status = Column(String(32))  # pending/generated/publishing/published/failed
     publish_id = Column(String(64))  # 微信 article_id
     account_id = Column(Integer, default=0)  # 发布到的公众号（多租户去重用）
+    theme = Column(String(64), default="")   # 卡片排版主题名（如「字节范」「阿里橙」）；扫码发布为空
     error = Column(Text)
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
     updated_at = Column(DateTime, default=_dt.datetime.utcnow, onupdate=_dt.datetime.utcnow)
@@ -149,7 +150,10 @@ def init_db():
 
 
 def _migrate_schema():
-    """兼容旧库：给 accounts 补 owner_id 列（create_all 不会给已存在表加列）"""
+    """兼容旧库：给已存在的表补新增列（create_all 不会给已存在表加列）：
+    · accounts.owner_id  —— 多租户归属（NULL=系统共享）
+    · articles.account_id —— 多租户去重
+    · articles.theme      —— 卡片排版主题名（通知里显示「（字节范）」等）"""
     try:
         with engine.connect() as c:
             cols = [r[1] for r in c.execute(text("PRAGMA table_info(accounts)")).fetchall()]
@@ -160,8 +164,11 @@ def _migrate_schema():
             if "account_id" not in cols2:
                 c.execute(text("ALTER TABLE articles ADD COLUMN account_id INTEGER DEFAULT 0"))
                 c.commit()
+            if "theme" not in cols2:
+                c.execute(text("ALTER TABLE articles ADD COLUMN theme VARCHAR(64) DEFAULT ''"))
+                c.commit()
     except Exception as e:  # noqa: BLE001
-        print(f"[migrate] accounts.owner_id 迁移失败（可忽略）: {e}")
+        print(f"[migrate] 列迁移失败（可忽略）: {e}")
 
 
 # ---- 每用户配置便捷函数 ----

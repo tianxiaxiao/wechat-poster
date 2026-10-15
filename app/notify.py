@@ -154,8 +154,12 @@ def send_job_summary(job: dict) -> dict:
         st = a.get("status")
         mark = "✅" if st == "published" else ("❌" if st == "failed" else f"⏳{st}")
         t = (a.get("title") or "").strip() or f"第{int(a.get('seq', 0)) + 1}篇（{a.get('topic', '')}）"
+        # 卡片排版主题（如「字节范」）→ 与每日汇总（build_summary_lines）格式保持一致；
+        # 扫码发布不经过卡片排版、无主题，则不加后缀。
+        theme = (a.get("theme") or "").strip()
+        suffix = f"（{theme}）" if theme else ""
         url = (a.get("url") or "").strip()
-        lines.append(f"- {mark} [{t[:50]}]({url})" if url else f"- {mark} {t[:60]}")
+        lines.append(f"- {mark} [{t[:50]}]({url}){suffix}" if url else f"- {mark} {t[:60]}{suffix}")
     if failed:
         lines.append(f"\n⚠️ 未成功 {len(failed)} 篇，可在网页任务列表查看原因")
     elif total:

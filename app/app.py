@@ -395,6 +395,11 @@ def _run_job(job_id: str):
                     job["log"].append(f"  第 {seq+1} 篇：生成卡片排版 HTML（随机主题）…")
                     body_html, _tmid, _tmname = wxcard.render_md_with_theme_safe(md_path.read_text(encoding="utf-8"))
                     job["log"].append(f"  第 {seq+1} 篇：排版主题「{_tmname}」")
+                    # 主题名落 job + DB：手动发布完成通知要显示「（字节范）」，与每日汇总保持一致；
+                    # 落库还能让「手动发的文章」在当天定时汇总里也带上主题（汇总优先读库）。
+                    job["articles"][seq]["theme"] = _tmname
+                    article.theme = _tmname
+                    db.commit()
                     # 存草稿（封面裁剪失败 53402 → 换封面立即重试）
                     mid, _cover_note = _add_draft_with_cover_retry(
                         title=article.title, body_html=body_html, author=job["author"],
@@ -1971,7 +1976,7 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                         else:
                             db3.add(Article(job_id=job_id, seq=seq, topic=topic, title=title,
                                            body_md=it["_body"], status="published", publish_id=pid,
-                                           account_id=acc.id))
+                                           account_id=acc.id, theme=it.get("theme", "")))
                         db3.commit(); db3.close()
                     except Exception as _e:
                         logger.warning("批次发布结果落库失败: %s", str(_e)[:100])
@@ -2109,7 +2114,8 @@ def _build_today_summary_items() -> list:
         rows = (db.query(Article).filter(Article.created_at >= utc_start, Article.status == "published")
                 .order_by(Article.id).all())
         items = [{"title": r.title or r.topic or "", "topic": r.topic or "",
-                  "publish_id": str(r.publish_id or ""), "status": "published"} for r in rows]
+                  "publish_id": str(r.publish_id or ""), "status": "published",
+                  "theme": (r.theme or "")} for r in rows]
     finally:
         db.close()
     if not items:
@@ -2127,7 +2133,8 @@ def _build_today_summary_items() -> list:
     except Exception as e:
         logger.warning("汇总取链接失败（将不带链接）：%s", str(e)[:100])
     for it in items:
-        it["theme"] = theme_by_title.get(it["title"], "")
+        # 优先用库里记的主题（手动/定时发布都会写库）；旧数据或扫码发布无主题时，回退到发布计划
+        it["theme"] = it.get("theme") or theme_by_title.get(it["title"], "")
         it["url"] = urls.get(it["publish_id"], "")
     return items
 
