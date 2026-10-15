@@ -1,0 +1,55 @@
+# ============================================================================
+# 公众号自动发布工具 —— systemd 服务单元（Linux）
+# ============================================================================
+# 为什么 Linux 不需要项目里的 scripts/guard.py：
+#   systemd 自带 `Restart=always`，进程退出一律拉起（含崩溃、OOM、重启后自启），
+#   比拼一个守护脚本更可靠、还能看 `journalctl` 日志。
+#
+# 用法（把 /opt/wechat-poster 换成你的实际路径；建议用绝对路径）：
+#   1) 项目放到 /opt/wechat-poster，并建好虚拟环境与依赖：
+#        python3 -m venv /opt/wechat-poster/.venv
+#        /opt/wechat-poster/.venv/bin/pip install -r /opt/wechat-poster/app/requirements.txt
+#        cd /opt/wechat-poster/app/wxcard && npm install     # 卡片排版需要 jsdom
+#        cp /opt/wechat-poster/app/.env.example /opt/wechat-poster/app/.env   # 填密钥
+#   2) 安装单元（二选一）：
+#        # 方式 A：系统服务（需要 root，开机即启）
+#        sudo cp deploy/linux/wechat-poster.service /etc/systemd/system/
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now wechat-poster
+#        # 方式 B：仅当前用户（无需 root，登录后启动）
+#        mkdir -p ~/.config/systemd/user && cp deploy/linux/wechat-poster.service ~/.config/systemd/user/
+#        systemctl --user daemon-reload && systemctl --user enable --now wechat-poster
+#        loginctl enable-linger "$USER"      # 未登录也保持运行（可选）
+#   3) 常用命令：
+#        systemctl status wechat-poster        # 看状态
+#        journalctl -u wechat-poster -f        # 跟日志
+#        systemctl restart wechat-poster       # 重启（改了代码之后）
+# ============================================================================
+
+[Unit]
+Description=WeChat MP Auto Publisher (公众号自动发布工具)
+Documentation=https://github.com/tianxiaxiao/wechat-poster
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ⚠️ 下面两行改成你的实际路径
+WorkingDirectory=/opt/wechat-poster/app
+ExecStart=/opt/wechat-poster/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8765
+
+# 应用自身会读取 app/.env，通常无需在这里再配环境变量。
+# 若要把密钥集中放在系统环境里（不推荐，容易和 app/.env 混淆），可取消下面一行注释：
+# EnvironmentFile=-/opt/wechat-poster/app/.env
+
+# —— 这一行就是「进程守护」：无论怎么退出都自动拉起 ——
+Restart=always
+RestartSec=5
+
+# systemd 停止服务时发 SIGTERM，uvicorn 正常退出码是 143/0，别被当成失败
+SuccessExitStatus=0 143
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

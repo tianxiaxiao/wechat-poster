@@ -13,6 +13,7 @@
 - [功能](#功能)
 - [截图](#截图)
 - [快速开始](#快速开始)
+- [长期后台运行（进程守护）](#长期后台运行进程守护)
 - [配置项](#配置项)
 - [两种发布方式](#两种发布方式)
 - [部署到 NAS（群晖）](#部署到-nas群晖)
@@ -94,6 +95,65 @@ docker compose up -d --build            # 或 docker-compose up -d --build
 
 访问 <http://localhost:8765>。数据落在 `./data/`。
 
+## 长期后台运行（进程守护）
+
+工具本体是个前台进程（`uvicorn`）——终端一关就没了。想让它「关掉终端还在跑、挂了自动起来、开机自启」，
+**按你的部署方式选一条即可，不要全都上**：
+
+| 部署方式 | 怎么常驻 / 守护 | 需要本项目的 `scripts/guard.py` 吗 |
+|---|---|---|
+| **Docker（含群晖 NAS）** | compose 已配 `restart: unless-stopped`，镜像自带 `HEALTHCHECK` | ❌ 不需要 |
+| **Linux** | systemd 单元，`Restart=always` 本身就是守护 → [`deploy/linux/wechat-poster.service`](deploy/linux/wechat-poster.service) | ❌ 不需要 |
+| **macOS** | launchd，`KeepAlive` 本身就是守护 → [`deploy/macos/com.wechatposter.plist`](deploy/macos/com.wechatposter.plist) | ❌ 不需要 |
+| **Windows** | 系统没有内置服务管理器 → 用本项目提供的守护脚本 + 「启动」文件夹 | ✅ 需要 |
+
+### Windows
+
+```powershell
+# 先看一眼：它打算用哪个解释器、什么命令、日志写哪里（不会启动任何东西）
+python scripts\guard.py --dry-run
+
+# 跑一次：端口没监听就拉起服务，然后退出
+python scripts\guard.py --once
+
+# 常驻守护：默认每 300 秒检查一次，服务掉了自动拉起（--interval 60 可改成每分钟）
+python scripts\guard.py --supervise
+
+# 装成开机自启（在当前用户的「启动」文件夹里放一个快捷方式；加 -Uninstall 撤销）
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-autostart.ps1
+
+# ⚠️ 若项目里没有 .venv\，请把「已装好依赖的解释器」显式指定给它，
+#    否则守护会用系统 PATH 里的 pythonw 去起服务，很可能因缺 uvicorn 而反复启动失败：
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-autostart.ps1 `
+           -Python "C:\你的venv\Scripts\python.exe"
+```
+
+- 日志：`logs/guard.log`（守护自身）、`logs/server.log`（服务输出），**都是 UTF-8**。
+- 脚本内**不含任何硬编码路径**：项目根、Python 解释器、日志目录全部按脚本位置自动推导；
+  解释器优先取项目内 `.venv` / `venv`，也可用环境变量 `POSTER_PYTHON` 指定。
+- 也可以用 Windows「任务计划程序」建一个「登录时触发」的任务，操作填
+  `python <你的路径>\scripts\guard.py --supervise`。
+- ⚠️ **别用 .bat 承载含中文的路径**：cmd.exe 按本地代码页读取 .bat，中文路径容易被解成乱码。
+  上面的 `.ps1` 生成的是 `.lnk` 快捷方式（路径以 UTF-16 存储），不受影响。
+
+### Linux / macOS
+
+按模板注释里那几步装上即可 —— 平台自带的服务管理器通常比脚本更可靠
+（崩溃、OOM、宿主重启都能拉起，日志也能用系统自带工具查看）。
+
+```bash
+# Linux（systemd）—— 先把 .service 里的路径改成你的
+sudo cp deploy/linux/wechat-poster.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now wechat-poster
+systemctl status wechat-poster && journalctl -u wechat-poster -f
+
+# macOS（launchd）—— 先把 .plist 里的路径改成你的
+cp deploy/macos/com.wechatposter.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/com.wechatposter.plist
+```
+
+想临时调试就直接前台跑 `python -m uvicorn app:app --host 127.0.0.1 --port 8765`（改完代码记得重启）。
+
 ## 配置项
 
 `app/.env`（本地运行）与项目根 `.env`（Docker 运行）字段相同：
@@ -139,6 +199,22 @@ mkdir -p data
 sudo $(which docker-compose) up -d --build
 ```
 
+**NAS 上不需要额外的进程守护**：compose 里的 `restart: unless-stopped` +
+镜像自带的 `HEALTHCHECK` 已经覆盖「容器退出 / 宿主重启后自动拉起」。
+装完确认一下就行：
+
+```bash
+sudo docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' wechat-poster   # 期望 unless-stopped
+sudo docker inspect -f '{{.State.Health.Status}}' wechat-poster             # 期望 healthy
+# 想实测守护是否真的生效（无损：数据在 ./data 绑定目录里）——杀掉它，几秒后应自己起来
+sudo docker kill wechat-poster && sleep 8 && sudo docker ps --filter name=wechat-poster
+```
+
+> ⚠️ 唯一需要额外手段的情况是进程**假死**（端口还在监听、接口却不响应）：
+> `HEALTHCHECK` 只会在 `docker ps` 里标成 `(unhealthy)`，**普通 docker/compose 不会据此重启容器**。
+> 真要自动化，可以另跑一个 [`willfarrell/autoheal`](https://hub.docker.com/r/willfarrell/autoheal)
+> 容器订阅 unhealthy 事件来重启 —— 一般场景没必要。
+
 ## 架构与代码结构
 
 ```
@@ -155,7 +231,9 @@ app/
 ├── dedup.py          历史文章相似度去重
 ├── notify.py         企业微信通知（分片/短链/汇总）
 ├── static/           单文件前端（index.html / login.html / logo）
-└── tests/            端到端测试（认证 38 项 + UI 渲染 16 项）
+└── tests/            端到端测试（临时库 + 独立端口；含浏览器「读计算样式」的渲染断言）
+scripts/              guard.py —— Windows 用的轻量进程守护（纯标准库、路径自动推导）
+deploy/               常驻运行模板：systemd（Linux）/ launchd（macOS）/ 启动文件夹（Windows）
 docker/               Dockerfile、compose、群晖部署文档
 ```
 
@@ -171,16 +249,38 @@ docker/               Dockerfile、compose、群晖部署文档
 
 ## 测试
 
-两套可复现的端到端测试（都用**临时数据库 + 独立端口**，不碰你的线上数据）：
+所有测试都用**临时数据库 + 独立端口**，不碰你的线上数据，也不会真的发布文章或调用真实大模型
+（需要网络的那几项用「进程内假服务」代替）。每个脚本跑完会打印 `通过 X / 共 Y`。
 
 ```bash
 cd app
-python tests/test_auth_flow.py     # 登录/角色/用户管理/操作日志 —— 38 项
-python tests/test_ui_main_page.py  # 前端渲染断言（无头浏览器）—— 16 项
+# —— 后端 / 接口（纯 Python）——
+python tests/test_auth_flow.py             # 登录、角色、用户管理、操作日志
+python tests/test_multitenant.py           # 多租户：账号隔离、每用户设置隔离、越权防护
+python tests/test_llm_key_policy.py        # 多用户 Key 策略：必须用自己的 Key / 管理员授权共享
+python tests/test_llm_test_conn.py         # 「测试连通」接口（内含进程内假 LLM 服务）
+python tests/test_local_llm_one_by_one.py  # 本地/自建模型逐篇生成（打桩计数，验证真实调用次数）
+python tests/test_owner_isolation.py       # 产品库 / 主题库归属隔离
+python tests/test_topic_product_bind.py    # 主题按产品过滤 + 批量归类 + 旧库迁移
+python tests/test_notify_theme.py          # 企业微信通知里的排版主题 + 旧库补列
+python tests/test_schedule_admin.py        # 管理员「定时总览 / 代管各用户定时」
+python tests/test_guard_script.py          # 进程守护脚本（打桩，不会真的拉起服务）
+
+# —— 前端渲染断言（无头 Chrome，读计算样式 / 量尺寸）——
+# 首次需要：cd wechat && npm install      （提供 playwright-core；本机需装 Chrome）
+node tests/render_check_key_policy.js      # Key 可编辑 / 缺 Key 警告 / 授权开关
+node tests/render_check_llm_test.js        # 「测试连通」按钮位置与状态颜色
+node tests/render_check_topic_product.js   # 主题随产品切换 + 排版尺寸
+node tests/render_check_users.js           # 用户管理每行按钮是否真的点得到
+node tests/render_check_schedule_admin.js  # 定时总览面板
 ```
 
-`test_ui_main_page.py` 会检查"改完 CSS/HTML 后页面真的长对了"（读计算样式、量行高、验证元素位置），
-这类断言比"看代码觉得对"可靠得多。
+渲染断言检查的是「改完 CSS/HTML 后页面**真的**长对了」：读计算样式、量行高与横向溢出、
+验证元素是否真在可视区内（例如「保存」按钮有没有被挤出屏幕）。
+这类断言比"看代码觉得对"可靠得多——它们抓到过好几个「接口返回正常、页面却点不到」的问题。
+
+另外 `tests/inspect_*.js` 是两个**排查工具**：造长/短数据 → 打开对应弹层 → 截图到 `.tmp_layout/`
+并打印每一行的实际尺寸，排版出问题时先用它"看到"，再动手改。
 
 ## 安全与合规（请务必阅读）
 

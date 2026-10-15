@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================================
+  公众号自动发布工具 —— launchd 服务（macOS）
+  ============================================================================
+  为什么 macOS 不需要项目里的 scripts/guard.py：
+    launchd 的 KeepAlive 就是守护（进程退出即拉起），且开机/登录自启、日志可查。
+
+  用法（把 /opt/wechat-poster 换成你的实际路径）：
+    1) 先按 README「方式一」装好依赖（虚拟环境 + app/wxcard 的 npm install）
+    2) 复制本文件到 ~/Library/LaunchAgents/ 并改好里面的路径：
+         cp deploy/macos/com.wechatposter.plist ~/Library/LaunchAgents/
+         # 编辑里面的 /opt/wechat-poster 三处路径
+         mkdir -p /opt/wechat-poster/logs          # 日志目录（如不存在）
+    3) 加载 / 卸载：
+         launchctl load  -w ~/Library/LaunchAgents/com.wechatposter.plist
+         launchctl unload -w ~/Library/LaunchAgents/com.wechatposter.plist
+    4) 查看：
+         launchctl list | grep wechatposter
+         tail -f /opt/wechat-poster/logs/launchd.err.log
+  ============================================================================
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wechatposter</string>
+
+    <!-- ⚠️ 三处 /opt/wechat-poster 都要改成你的实际路径 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/wechat-poster/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>app:app</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8765</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/wechat-poster/app</string>
+
+    <!-- 登录即启动 + 挂掉就拉起：这两条就是「进程守护」 -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/opt/wechat-poster/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/wechat-poster/logs/launchd.err.log</string>
+</dict>
+</plist>
