@@ -152,11 +152,18 @@ async function findRow(scope, text) {
       await edaRow.$eval(".sa-enable", el => { if (!el.checked) el.click(); });
       await edaRow.$eval(".sa-time", el => { el.value = "09:15"; });
       await (await edaRow.$(".sa-save")).click();
-      await page.waitForTimeout(1500);
+      // 等页面反馈（保存请求 + 自动刷新都有延迟；用固定 sleep 会偶发失败）
+      await page.waitForFunction(
+        () => (document.querySelector("#sched-admin-msg")?.textContent || "").includes("已保存"),
+        { timeout: 12000 }).catch(() => {});
       const msg = await page.$eval("#sched-admin-msg", el => (el.textContent || "").trim());
       check("代管保存后页面反馈成功", msg.includes("已保存"), `msg="${msg}"`);
 
-      // 保存后面板自动刷新，回显应为「已开启 + 09:15」
+      // 保存后面板自动刷新，回显应为「已开启 + 09:15」——等刷新真正落地再断言
+      await page.waitForFunction(() => {
+        const rows = [...document.querySelectorAll("#sched-admin-list [data-uid]")];
+        return rows.some(r => (r.textContent || "").includes("edA") && r.querySelector(".sa-enable")?.checked);
+      }, { timeout: 12000 }).catch(() => {});
       const edaRow2 = await findRow(page, "edA");
       if (edaRow2) {
         check("代管结果回显：edA 定时为开启",

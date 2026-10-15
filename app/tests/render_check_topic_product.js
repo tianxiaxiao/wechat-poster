@@ -182,6 +182,36 @@ async function login(page, user, pw) {
     const namesF = await page.$$eval("#topic-list .topic-cb", els => els.map(e => e.dataset.name));
     check("选美食街则有主题（归类生效）", namesF.length > 0, `共${namesF.length}个`);
 
+    // ---- 主界面：一键全选 / 一键全不选 ----
+    console.log("\n[F] 主界面：一键全选 / 全不选");
+    const nBefore = await page.$$eval("#topic-list .topic-cb", els => els.length);
+    const checkedBefore = await page.$$eval("#topic-list .topic-cb:checked", els => els.length);
+    check("初始：当前产品的主题默认全被勾选", nBefore > 0 && checkedBefore === nBefore,
+          `${checkedBefore}/${nBefore}`);
+
+    // 顺带验证临时主题也会被「全不选」清掉
+    await page.fill("#new_topic", "ZZ临时主题");
+    await page.$eval("#add-topic-tmp", el => el.click());
+    await page.waitForTimeout(300);
+    const tmpN = await page.$$eval("#topic-list .tmp-cb", els => els.length);
+    check("已加入 1 个临时主题（且默认勾选）", tmpN === 1, `tmp=${tmpN}`);
+
+    await page.$eval("#topic-sel-none-btn", el => el.click());
+    await page.waitForTimeout(400);
+    const checkedNone = await page.$$eval("#topic-list .topic-cb:checked", els => els.length);
+    check("点「全不选」→ 勾选数归 0 ★核心", checkedNone === 0, `checked=${checkedNone}`);
+    const tmpAfter = await page.$$eval("#topic-list .tmp-cb", els => els.length);
+    check("「全不选」把临时主题也清掉", tmpAfter === 0, `tmp=${tmpAfter}`);
+    const hintNone = await page.$eval("#topic-sel-hint", el => el.textContent || "");
+    check("「全不选」后计数显示 0 个主题", hintNone.includes("共 0 个主题"), hintNone);
+
+    await page.$eval("#topic-sel-all-btn", el => el.click());
+    await page.waitForTimeout(400);
+    const checkedAll = await page.$$eval("#topic-list .topic-cb:checked", els => els.length);
+    check("点「全选」→ 全部重新勾选 ★核心", checkedAll === nBefore, `checked=${checkedAll}/${nBefore}`);
+    const hintAll = await page.$eval("#topic-sel-hint", el => el.textContent || "");
+    check("「全选」后计数恢复", hintAll.includes(`共 ${nBefore} 个主题`), hintAll);
+
     console.log("\n" + "=".repeat(56));
     console.log(`=== 渲染断言：通过 ${pass} / 共 ${pass + fail}；失败 ${fail} ===`);
     process.exitCode = fail === 0 ? 0 : 1;

@@ -153,7 +153,11 @@ button { line-height: 1.2; }
     <div>
       <div class="flex items-center justify-between mb-0.5">
         <span class="field-label mb-0"><span id="topic-scope-hint" class="font-normal text-slate-400"></span>选择主题（可多选，也可加自定义主题）</span>
-        <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
+        <span class="flex items-center gap-1.5">
+          <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
+          <button type="button" id="topic-sel-all-btn" class="px-1.5 py-[1px] text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="全选当前产品的全部主题">☑ 全选</button>
+          <button type="button" id="topic-sel-none-btn" class="px-1.5 py-[1px] text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="取消所有已选主题（含临时主题）">☐ 全不选</button>
+        </span>
       </div>
       <div id="topic-list" class="flex flex-wrap gap-1"></div>
       <div class="flex gap-1.5 mt-1.5">
@@ -1560,6 +1564,18 @@ $('#topic-add').addEventListener('click', async () => {
     await openTopicMgr();
     window._topicInitDone = false; loadTopics();
   } catch(e){ alert('添加失败：'+e.message); }
+});
+// 主界面：一键全选 / 一键全不选（只作用于【当前产品可见】的主题）
+$('#topic-sel-all-btn').addEventListener('click', () => {
+  SEL_TOPICS = new Set(TOPICS.map(t => t.id));   // 临时主题本就"存在即勾选"，无需处理
+  saveSelTopics();
+  renderTopicSel();
+});
+$('#topic-sel-none-btn').addEventListener('click', () => {
+  SEL_TOPICS = new Set();
+  TMP_TOPICS = [];                               // 临时主题一并不选（与"加入即勾选"的设计一致）
+  saveSelTopics();
+  renderTopicSel();
 });
 // 临时主题加入勾选
 $('#add-topic-tmp').addEventListener('click', addTmpTopic);
