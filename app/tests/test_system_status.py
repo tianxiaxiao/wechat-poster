@@ -205,9 +205,16 @@ def main():
                   ip.get("ip") == "" or bool(IPV4.match(ip.get("ip") or "")), f"ip={ip.get('ip')!r}")
             _wp = ip.get("whitelist_path", "")
             check("白名单提示里带后台路径", "IP白名单" in _wp, _wp[:50])
-            # 2026-10-16：路径写错过（写成了「基本配置」，那里只有 AppID/AppSecret）→ 钉死正确路径
-            check("★ 白名单路径是「设置与开发 → 安全中心」而不是「基本配置」",
-                  "安全中心" in _wp and "基本配置" not in _wp, _wp[:60])
+            # 2026-10-16：公众号的「开发接口管理」已迁移到**微信开发者平台**，
+            # 先后写错过两次（基本配置 / 安全中心都是迁移前的旧路径）→ 钉死新路径
+            check("★ 白名单路径是「微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单」",
+                  "微信开发者平台" in _wp and "基础信息" in _wp and "API IP白名单" in _wp, _wp[:70])
+            check("★ 不再出现迁移前的旧路径（安全中心 / 基本配置）",
+                  "安全中心" not in _wp and "基本配置" not in _wp, _wp[:70])
+            check("★ 打开的是微信开发者平台而不是公众平台后台",
+                  "developers.weixin.qq.com" in (ip.get("whitelist_page") or "")
+                  and "mp.weixin.qq.com" not in (ip.get("whitelist_page") or ""),
+                  str(ip.get("whitelist_page")))
             check("含 ok_ip / changed_since_ok 字段", "ok_ip" in ip and "changed_since_ok" in ip)
             st, ip2 = adm.get("/api/system/public-ip")
             check("★ 第二次读走缓存（cached_sec 有值）", ip2.get("ip") == ip.get("ip"),

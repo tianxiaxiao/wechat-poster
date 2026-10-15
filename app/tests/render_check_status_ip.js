@@ -103,7 +103,7 @@ const READ_IPBAR = () => {
     inLlmFields: !!bar.closest(".llm-fields"),
     ipText: (ip.textContent || "").trim(), ipData: ip.dataset.ip || "",
     ipWidth: Math.round(ipr.width),
-    // ★ 「打开公众号后台」必须和出口 IP 在同一排（同一行的垂直中心差 < 12px）
+    // ★ 「打开微信开发者平台」必须和出口 IP 在同一排（同一行的垂直中心差 < 12px）
     mpSameRow: !!(mpr && Math.abs((mpr.top + mpr.height / 2) - (ipr.top + ipr.height / 2)) < 12),
     rowOverflowX: rr ? row.scrollWidth - row.clientWidth : null,
     rowH: rr ? Math.round(rr.height) : null,
@@ -111,6 +111,7 @@ const READ_IPBAR = () => {
     barRight: Math.round(br.right), h: Math.round(br.height),
     refresh: btn("acct-ip-refresh"), copy: btn("acct-ip-copy"), mp: btn("acct-mp-link"),
     mpHref: link ? link.getAttribute("href") : "", mpTarget: link ? link.getAttribute("target") : "",
+    mpText: link ? (link.textContent || "").trim() : "",
     note: (document.getElementById("acct-ip-note") || {}).textContent || "",
     note2: (document.getElementById("acct-ip-note2") || {}).textContent || "",
     visible: bar.offsetParent !== null,
@@ -285,19 +286,23 @@ const READ_IPBAR = () => {
     check("★ 三个按钮/链接都没被挤出视野（本项目经典坑）",
           [ib.refresh, ib.copy, ib.mp].every(b => b && b.visible && b.right <= ib.barRight + 1),
           JSON.stringify({ refresh: ib.refresh, copy: ib.copy, mp: ib.mp, barRight: ib.barRight }));
-    check("「打开公众号后台」指向 mp.weixin.qq.com 且新标签打开",
-          /mp\.weixin\.qq\.com/.test(ib.mpHref) && ib.mpTarget === "_blank",
+    // 2026-10-16：「开发接口管理」已迁移到微信开发者平台，旧入口 mp.weixin.qq.com 不再管白名单
+    check("★ 按钮文案是「打开微信开发者平台」", /打开微信开发者平台/.test(ib.mpText), ib.mpText);
+    check("★ 指向 developers.weixin.qq.com/platform 且新标签打开",
+          /developers\.weixin\.qq\.com\/platform/.test(ib.mpHref) && ib.mpTarget === "_blank",
           `${ib.mpHref} target=${ib.mpTarget}`);
-    check("★ 第一排 = 白名单填写路径（含「IP白名单」）", /IP白名单/.test(ib.note), ib.note.slice(0, 60));
-    // 2026-10-16：路径曾写错成「基本配置」（那里只有 AppID/AppSecret）→ 钉死「安全中心」
-    check("★ 路径是「设置与开发 → 安全中心」而非「基本配置」",
-          /安全中心/.test(ib.note) && !/基本配置/.test(ib.note), ib.note.slice(0, 60));
+    check("★ 第一排 = 白名单填写路径（含「API IP白名单」）", /API IP白名单/.test(ib.note), ib.note.slice(0, 60));
+    check("★ 路径是「微信开发者平台 → 公众号/服务号 → 基础信息」",
+          /微信开发者平台/.test(ib.note) && /公众号\/服务号/.test(ib.note) && /基础信息/.test(ib.note),
+          ib.note.slice(0, 60));
+    check("★ 不再出现迁移前的旧路径（安全中心 / 基本配置）",
+          !/安全中心/.test(ib.note) && !/基本配置/.test(ib.note), ib.note.slice(0, 60));
     check("★ 第二排 = 上次验证通过的 IP", /^上次验证通过的 IP：/.test(ib.note2.trim()), ib.note2.slice(0, 60));
     check("★ 两排文案不混在一起（第一排不含「上次验证通过」）", !/上次验证通过/.test(ib.note), ib.note.slice(0, 40));
     await shot(p, "si_03_ipbar.png", "#acct-modal .settings-panel");
 
-    console.log("\n[C2] 打开公众号后台固定在出口 IP 那一排（不换行、不溢出）");
-    check("★ 「打开公众号后台」与 IP 框同一排", ib.mpSameRow === true, `sameRow=${ib.mpSameRow}`);
+    console.log("\n[C2] 打开微信开发者平台固定在出口 IP 那一排（不换行、不溢出）");
+    check("★ 「打开微信开发者平台」与 IP 框同一排", ib.mpSameRow === true, `sameRow=${ib.mpSameRow}`);
     check("★ IP 那一行不横向溢出", ib.rowOverflowX !== null && ib.rowOverflowX <= 0,
           `rowOverflow=${ib.rowOverflowX}px rowH=${ib.rowH}px`);
     check("★ IP 那一行是单行高度（没被挤成两行）", ib.rowH !== null && ib.rowH <= 34, `rowH=${ib.rowH}px`);

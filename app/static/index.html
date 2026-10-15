@@ -410,14 +410,14 @@ button { line-height: 1.2; }
 
 <!-- ===== 公众号账号管理 modal ===== -->
 <div id="acct-modal" class="settings-modal hidden">
-  <!-- 面板放宽到 580px：顶部「出口 IP」那一排是单行不换行的（IP 框 + 刷新/复制/打开后台），
-       520px 装不下会溢出 9px 把「打开公众号后台」挤出去 -->
+  <!-- 面板放宽到 580px：顶部「出口 IP」那一排是单行不换行的（IP 框 + 刷新/复制/打开开发者平台），
+       520px 装不下会溢出 9px 把「打开微信开发者平台」挤出去 -->
   <div class="settings-panel" style="max-width:580px">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-lg font-bold text-slate-900">📱 公众号账号管理</h3>
       <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="acct-modal">&times;</button>
     </div>
-    <!-- 发布出口 IP：照它填公众号后台的 IP 白名单（放在 .llm-fields 之外，避免被表单样式污染） -->
+    <!-- 发布出口 IP：照它填微信开发者平台的 API IP 白名单（放在 .llm-fields 之外，避免被表单样式污染） -->
     <div id="acct-ipbar" class="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
       <div id="acct-ip-row" class="flex items-center gap-1.5 flex-nowrap whitespace-nowrap text-xs">
         <span class="font-semibold text-slate-700 shrink-0">🌐 发布出口 IP</span>
@@ -425,8 +425,8 @@ button { line-height: 1.2; }
         <code id="acct-ip" class="shrink-0 inline-block w-[104px] text-center px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[12px] text-slate-800">查询中…</code>
         <button id="acct-ip-refresh" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">🔄 刷新</button>
         <button id="acct-ip-copy" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">📋 复制</button>
-        <a id="acct-mp-link" href="https://mp.weixin.qq.com/" target="_blank" rel="noopener noreferrer"
-           class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开公众号后台</a>
+        <a id="acct-mp-link" href="https://developers.weixin.qq.com/platform/" target="_blank" rel="noopener noreferrer"
+           class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开微信开发者平台</a>
       </div>
       <!-- 第一排：白名单填写路径；第二排：上次验证通过的 IP（漂移对比） -->
       <div id="acct-ip-note" class="mt-1 text-[11px] text-slate-400"></div>
@@ -2068,7 +2068,7 @@ $('#acct-add').addEventListener('click', async () => {
 // 弹层开关
 $('#prod-btn').addEventListener('click', () => { $('#prod-modal').classList.remove('hidden'); loadProducts(); });
 $('#acct-btn').addEventListener('click', () => { $('#acct-modal').classList.remove('hidden'); loadAccounts(); loadEgressIp(false); });
-// 出口 IP：刷新 / 复制 / 打开公众号后台
+// 出口 IP：刷新 / 复制 / 打开微信开发者平台
 $('#acct-ip-refresh').addEventListener('click', () => loadEgressIp(true));
 $('#acct-ip-copy').addEventListener('click', async () => {
   const ip = $('#acct-ip').dataset.ip || $('#acct-ip').textContent.trim();

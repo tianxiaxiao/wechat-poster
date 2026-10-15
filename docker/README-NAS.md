@@ -318,7 +318,7 @@ sudo docker run -d --name poster-cloudflared --restart unless-stopped \
 
 | 事项 | 说明 |
 |---|---|
-| **微信 IP 白名单** | 发布是 NAS **主动出网**调微信接口，微信看到的是你**家里宽带的公网 IP**（与原 Windows 机同一出口时无需改动）。若换到别的网络/机房，需去公众号后台加新 IP，否则报 40164。容器日志会打印被拒 IP |
+| **微信 IP 白名单** | 发布是 NAS **主动出网**调微信接口，微信看到的是你**家里宽带的公网 IP**（与原 Windows 机同一出口时无需改动）。若换到别的网络/机房，需到「微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单」加新 IP，否则报 40164。容器日志会打印被拒 IP |
 | **不要暴露 8765 到公网** | 只走隧道即可；路由器上不要做 8765 端口映射。若只想隧道访问，可把 `docker-compose.yml` 里 `ports:` 两行注释掉 |
 | **HTTPS 与 Cookie** | 经隧道访问时 `COOKIE_SECURE=auto` 会自动给会话 Cookie 加 Secure。**混用 http 内网地址与 https 域名会各需登录一次**（属正常） |
 
@@ -493,7 +493,7 @@ sudo $(which docker-compose) up -d
 | 打不开页面 | `sudo docker ps` 看容器是否在跑；`sudo docker logs wechat-poster` 看报错 |
 | 一直跳登录页 / 登录后立刻退出 | 浏览器禁用了 Cookie；或混用 http/https 访问（各需登录一次） |
 | 忘记管理员密码 | 见本节末「重置管理员密码」 |
-| 发布报 40164 | 微信 IP 白名单：把日志里提示的 IP 加进公众号后台（约 10 分钟生效） |
+| 发布报 40164 | 把日志里提示的 IP 加进「微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单」（约 10 分钟生效） |
 | 发布报 401/token 无效 | 检查 `docker/.env` 里 `WX_APPID`/`WX_SECRET` |
 | 生成失败 | 检查 `DEEPSEEK_API_KEY` 是否有效、是否有额度 |
 | 定时没触发 | 容器需在运行；时间为北京时间 09:30；服务当天晚启动会在 20:00 前自动补跑一次 |
