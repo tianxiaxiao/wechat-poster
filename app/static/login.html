@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>登录 · 润致公众号自动发布工具</title>
+<link rel="icon" href="/static/logo.png" type="image/png" />
+<!-- 刻意不依赖任何 CDN：Cloudflare 隧道/内网环境下也能正常登录 -->
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #f5f6f8; color: #1e293b; padding: 24px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+  .card {
+    width: 100%; max-width: 360px; background: #fff; border: 1px solid #e8eaee;
+    border-radius: 14px; padding: 26px 24px 22px; box-shadow: 0 10px 30px rgba(15, 23, 42, .07);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  .brand img { width: 38px; height: 38px; border-radius: 9px; object-fit: contain; }
+  .brand h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .brand p { margin: 2px 0 0; font-size: 11px; color: #94a3b8; }
+  label { display: block; font-size: 12px; color: #475569; font-weight: 600; margin: 0 0 5px; }
+  input {
+    width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid #d5dae2;
+    border-radius: 9px; outline: none; transition: border-color .15s, box-shadow .15s; background: #fff;
+  }
+  input:focus { border-color: #E30012; box-shadow: 0 0 0 3px rgba(227, 0, 18, .12); }
+  .field { margin-bottom: 14px; }
+  button {
+    width: 100%; padding: 11px; font-size: 14px; font-weight: 600; color: #fff; cursor: pointer;
+    background: #E30012; border: 0; border-radius: 9px; transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #C0000F; }
+  button:disabled { opacity: .6; cursor: default; }
+  .msg { font-size: 12.5px; margin: 0 0 12px; padding: 8px 10px; border-radius: 8px; display: none; }
+  .msg.err { display: block; background: #FDEDEE; color: #B0000E; border: 1px solid #F6C9CD; }
+  .msg.ok { display: block; background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; }
+  .foot { margin-top: 16px; font-size: 11px; color: #a0aab8; line-height: 1.6; }
+  .tip { margin-top: 10px; font-size: 11.5px; color: #94a3b8; }
+</style>
+</head>
+<body>
+  <form class="card" id="f" autocomplete="on">
+    <div class="brand">
+      <img src="/static/logo.png" alt="润致传媒" />
+      <div>
+        <h1>润致公众号自动发布工具</h1>
+        <p>请登录后使用</p>
+      </div>
+    </div>
+    <div class="msg" id="msg"></div>
+    <div class="field">
+      <label for="u">用户名</label>
+      <input id="u" name="username" type="text" autocapitalize="off" autocorrect="off" autofocus required />
+    </div>
+    <div class="field">
+      <label for="p">密码</label>
+      <input id="p" name="password" type="password" required />
+    </div>
+    <button id="btn" type="submit">登 录</button>
+    <div class="tip" id="tip"></div>
+    <div class="foot">首次使用请用管理员账号登录（初始密码见部署说明；登录后请在「用户管理」里修改）。</div>
+  </form>
+
+<script>
+const $ = s => document.querySelector(s);
+const msg = (t, cls) => { const m = $('#msg'); m.textContent = t; m.className = 'msg ' + cls; };
+const nextUrl = new URLSearchParams(location.search).get('next') || '/';
+
+// 若已登录（例如会话仍在），直接进主页
+fetch('/api/auth/me').then(r => { if (r.ok) location.replace(nextUrl); }).catch(() => {});
+
+$('#f').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#btn');
+  btn.disabled = true; btn.textContent = '登录中…'; msg('', '');
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('#u').value.trim(), password: $('#p').value })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg(d.detail || ('登录失败（HTTP ' + r.status + '）'), 'err'); return; }
+    msg('登录成功，正在进入…', 'ok');
+    location.replace(nextUrl);
+  } catch (err) {
+    msg('网络错误：' + err.message, 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '登 录';
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# ============================================================
+# 润致公众号自动发布工具 — docker compose 部署（群晖 Container Manager 可用）
+#
+# 用法（在 docker/ 目录下）：
+#   1. cp .env.example .env   （把 DEEPSEEK_API_KEY / WX_SECRET / ADMIN_INIT_PASSWORD 改成真实值）
+#   2. docker compose up -d --build
+#   3. 浏览器访问 http://<NAS-IP>:8765 → 用管理员账号登录（默认用户名 admin）
+#
+# 公网访问（Cloudflare 隧道）：
+#   docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+#   详细步骤见 README-NAS.md 第六节
+# ============================================================
+version: "3.8"   # 兼容群晖旧版 compose 校验器；新版会忽略
+
+services:
+  poster:
+    build:
+      context: ..            # 项目根（含 app/）
+      dockerfile: docker/Dockerfile
+    image: poster-api:1.1
+    container_name: wechat-poster
+    restart: unless-stopped        # NAS 重启后自动拉起，保证每日定时不中断
+    ports:
+      # 端口映射到宿主机（内网即可访问）。若只用 Cloudflare 隧道、不想暴露内网端口，
+      # 可把下面两行注释掉，改由 cloudflared 容器通过服务名访问 poster:8765。
+      - "8765:8765"
+    environment:
+      - TZ=Asia/Shanghai           # 每日定时 09:30 按北京时间触发
+      # 数据库位置（在数据卷内，容器重建不丢）
+      - POSTER_DB=/srv/poster/app/data/poster.db
+      # 会话 Cookie：auto=跟随请求协议（经 Cloudflare 隧道 https 访问时自动加 Secure）
+      - COOKIE_SECURE=auto
+    env_file:
+      - ./.env                     # 凭证：DEEPSEEK_API_KEY / WX_SECRET / APP_SECRET_KEY / ADMIN_INIT_PASSWORD …
+    volumes:
+      # 数据卷：数据库 + 生成的文章正文 + 日志 + 二维码，删除容器不丢数据
+      - poster_data:/srv/poster/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8765/health',timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  poster_data:

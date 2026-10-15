@@ -1,0 +1,97 @@
+# ============================================================
+# .gitignore —— 开源前务必保留本文件
+# 原则：**任何密钥、任何用户数据、任何本机产物都不许进仓库**
+# ============================================================
+
+# ---------- 一、密钥与凭证（最重要）----------
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+
+# wechat/config.json 存明文 AppSecret（仓库里用 config.example.json 代替）
+**/config.json
+!**/config.example.json
+**/管理员初始密码.txt
+!**/管理员初始密码.example.txt
+
+# ---------- 二、运行数据（含用户密码散列与真实文章）----------
+data/
+**/poster.db
+**/poster.db-shm
+**/poster.db-wal
+**/*.sqlite
+**/*.sqlite3
+app/data/
+app/uvicorn.log
+app/uvicorn.err
+**/logs/
+**/qrcodes/
+# 生成的文章正文
+**/articles/*.md
+
+# ---------- 三、本机工具与内部记录（含密钥备份！）----------
+# .workbuddy 是本机助手的工作记录，里面出现过密钥与会话信息，绝不入库
+.workbuddy/
+# 迁移打包（含数据库与密钥）
+migration/*.zip
+migration/poster-migration.zip
+
+# ---------- 四、前端依赖与大文件 ----------
+**/node_modules/
+**/.next/
+**/dist/
+**/build/
+# 旧镜像导出包（几十 MB）
+docker/poster-api-*.tar.gz
+*.tar.gz
+*.zip
+!migration/README*.md
+
+# ---------- 五、本机产物（截图/日志/图片）----------
+generated-images/
+app/wxcard/*.png
+app/wxcard/diff_*.html
+app/wxcard/orig_*.html
+app/wxcard/mine_*.html
+app/wxcard/data.json
+app/wxcard/test_out.html
+wechat/*.png
+wechat/diag_*.png
+wechat/draft_ids.json
+wechat/publish_results.json
+wechat/article*.md
+app/covers/
+wechat/covers/
+app/*.log
+
+# ---------- 六、编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+venv/
+.venv/
+env/
+
+# ---------- 七、本项目的额外排除（2026-10-15 开源整理时补充）----------
+# 业务内容与品牌素材：按需决定是否公开（默认不公开）
+百秘一梳偏头痛软文.md
+百秘一梳营销软文.md
+润致传媒LOGO_200.png
+app/static/logo_backup_*.png
+# 我生成的一次性预览页（含真实文章标题）
+app/wxcard/preview_today*.html
+# 随手留的截图
+app/*.png

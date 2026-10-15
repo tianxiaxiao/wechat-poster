@@ -1,0 +1,33 @@
+{
+  "appid": "wx-your-appid-here",
+  "secret": "your-secret-here",
+  "articles": [
+    {
+      "title": "偏头痛这毛病，没疼过的人不懂",
+      "author": "百秘一梳",
+      "digest": "没疼过的人不懂偏头痛。一把本草梳，帮我扛过了最难熬的关口。",
+      "content_source_url": "http://bmys.com.cn",
+      "content_md": "D:/测试公众号批量生成/wechat/article4.md",
+      "need_open_comment": 0,
+      "only_fans_can_comment": 0
+    },
+    {
+      "title": "为了治头痛，我试过的办法能写满一页纸",
+      "author": "百秘一梳",
+      "digest": "为了治头痛，我试的办法能写满一页纸，最后帮上忙的竟是最土的梳头。",
+      "content_source_url": "http://bmys.com.cn",
+      "content_md": "D:/测试公众号批量生成/wechat/article5.md",
+      "need_open_comment": 0,
+      "only_fans_can_comment": 0
+    },
+    {
+      "title": "我妈偏头痛，我最后送了她一把梳子",
+      "author": "百秘一梳",
+      "digest": "我妈偏头痛几十年，我最后送了她一把梳子，她天天用。",
+      "content_source_url": "http://bmys.com.cn",
+      "content_md": "D:/测试公众号批量生成/wechat/article6.md",
+      "need_open_comment": 0,
+      "only_fans_can_comment": 0
+    }
+  ]
+}

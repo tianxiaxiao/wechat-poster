@@ -1,0 +1,1270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>润致公众号自动发布工具</title>
+<link rel="icon" href="/static/logo.png" type="image/png" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+/* 品牌色重映射（2026-10-10）：把 Tailwind 的 blue 色阶整体替换为「润致传媒」品牌红，
+   取自 logo 主色 #E30012。这样页面上已有的 blue-* 类（按钮/链接/选中态/焦点环）
+   无需逐个改类名即统一变红，也不会受样式注入顺序影响。
+   注意：后续若要真正的蓝色，请用其他色阶（如 sky/indigo），不要再依赖 blue-*。 */
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        blue: {
+          50:  '#FDEDEE',
+          100: '#FBD8DB',
+          200: '#F6B0B5',
+          300: '#EF818A',
+          400: '#E84A57',
+          500: '#E30012',
+          600: '#E30012',
+          700: '#C0000F',
+          800: '#A8000D',
+          900: '#8A000B'
+        }
+      }
+    }
+  }
+};
+</script>
+<style>
+* { box-sizing: border-box; }
+html, body { height: auto; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f8fafc; color: #1e293b; }
+.spinner { animation: spin 1s linear infinite; border: 2px solid #cbd5e1; border-top-color: #E30012; border-radius: 50%; width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.step-badge { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.12rem 0.45rem; border-radius: 9999px; font-size: 0.66rem; font-weight: 500; white-space: nowrap; }
+.badge-pending { background: #f1f5f9; color: #64748b; }
+.badge-running { background: #FDEDEE; color: #B0000E; }
+.badge-ok { background: #dcfce7; color: #166534; }
+.badge-fail { background: #fee2e2; color: #991b1b; }
+.badge-provider-deepseek { background: #ede9fe; color: #6d28d9; }
+.badge-provider-ollama { background: #fef3c7; color: #b45309; }
+.badge-provider-openai_compat { background: #cffafe; color: #155e75; }
+pre.log { background: #0f172a; color: #e2e8f0; font-size: 10px; line-height: 1.45; padding: 0.4rem 0.55rem; border-radius: 0.375rem; max-height: 8rem; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+/* ===== 任务列表紧凑模式（2026-10-09 用户要求：字号更小、行距更紧、一屏看更多） ===== */
+#jobs > div[data-job] { padding: 0.6rem 0.7rem; border-radius: 0.5rem; }
+#jobs .job-head { margin-bottom: 0.3rem; }
+#jobs .job-title { font-size: 0.8rem; line-height: 1.3; }
+#jobs .job-meta { font-size: 0.66rem; margin-top: 0; }
+#jobs div[data-seq] { padding-top: 0.25rem; margin-top: 0.25rem; }
+#jobs .art-line { font-size: 0.79rem; line-height: 1.35; gap: 0.35rem; }
+#jobs .art-snippet { font-size: 0.68rem; line-height: 1.35; margin-top: 0.1rem; }
+#jobs .art-error { font-size: 0.68rem; line-height: 1.35; margin-top: 0.1rem; }
+#jobs details { margin-top: 0.3rem; }
+#jobs details > summary { font-size: 0.68rem; }
+#jobs .topic-chip { font-size: 0.66rem; padding: 0 0.25rem; }
+/* 二维码：大图 modal 用 object-fit:contain 防变形；列表内小预览用方形框 */
+.qr-thumb { width: 220px; height: 220px; object-fit: contain; background: #fff; border: 1px solid #e2e8f0; border-radius: 0.5rem; cursor: zoom-in; }
+.qr-modal-img { max-width: 92vw; max-height: 82vh; object-fit: contain; background: #fff; border-radius: 0.5rem; }
+/* 齿轮弹层 */
+.settings-modal { position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.settings-panel { background: #fff; border-radius: 1rem; box-shadow: 0 20px 60px rgba(0,0,0,0.25); width: 100%; max-width: 520px; max-height: 88vh; overflow: auto; padding: 1.5rem; }
+.llm-fields label { display: block; font-size: 0.7rem; color: #475569; font-weight: 600; margin-top: 0.7rem; margin-bottom: 0.2rem; }
+.llm-fields input, .llm-fields select { width: 100%; border: 1px solid #cbd5e1; border-radius: 0.375rem; padding: 0.4rem 0.6rem; font-size: 0.85rem; font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace; background: #fff; }
+.llm-fields input:focus, .llm-fields select:focus { outline: none; border-color: #E30012; box-shadow: 0 0 0 2px rgba(227,0,18,0.15); }
+.llm-fields .hint { font-size: 0.72rem; color: #94a3b8; margin-top: 0.3rem; line-height: 1.5; }
+.field-label { font-size: 0.66rem; color: #64748b; font-weight: 600; margin-bottom: 0.1rem; line-height: 1.3; }
+.field-input { width: 100%; border: 1px solid #cbd5e1; border-radius: 0.375rem; padding: 0.28rem 0.5rem; font-size: 0.82rem; }
+.field-input:focus { outline: none; border-color: #E30012; box-shadow: 0 0 0 2px rgba(227,0,18,0.15); }
+.gear-btn { display: inline-flex; align-items: center; gap: 0.4rem; background: #fff; border: 1px solid #e2e8f0; color: #334155; border-radius: 0.5rem; padding: 0.4rem 0.7rem; font-size: 0.8rem; cursor: pointer; transition: all .15s; }
+.gear-btn:hover { border-color: #E30012; color: #E30012; }
+.hidden { display: none !important; }
+/* 发布按钮整行独占，运行状态文字变化不位移 */
+#run-btn { white-space: nowrap; }
+button { line-height: 1.2; }
+</style>
+</head>
+<body>
+<div class="max-w-3xl mx-auto px-5 py-7">
+
+<header class="mb-6">
+  <!-- 第一排：Logo + 标题 + 模型标签 -->
+  <div class="flex items-center gap-3 flex-nowrap">
+    <img src="/static/logo.png" alt="润致传媒 logo" class="h-9 w-9 object-contain rounded-lg shrink-0"
+         onerror="this.style.display='none'" />
+    <h1 class="text-xl font-bold text-slate-900 flex items-center gap-2 whitespace-nowrap shrink-0">润致公众号自动发布工具
+      <span id="provider-tag" class="hidden"></span>
+    </h1>
+    <!-- 当前登录用户 + 退出（右上角；改密码入口已移入「用户管理」） -->
+    <div class="ml-auto flex items-center gap-2 text-xs text-slate-500 whitespace-nowrap shrink-0">
+      <span id="cur-user" class="whitespace-nowrap">…</span>
+      <button id="logout-btn" class="gear-btn" type="button">退出</button>
+    </div>
+  </div>
+  <!-- 第二排：功能入口 -->
+  <div class="flex items-center gap-2 flex-wrap mt-3">
+    <button id="acct-btn" class="gear-btn" type="button">📱 <span>公众号</span></button>
+    <button id="topic-btn" class="gear-btn" type="button">📚 <span>主题库</span></button>
+    <button id="prod-btn" class="gear-btn" type="button">📦 <span>产品库</span></button>
+    <button id="gear-btn" class="gear-btn" type="button">⚙️ <span>模型设置</span></button>
+    <button id="users-btn" class="gear-btn hidden" type="button">👥 <span>用户管理</span></button>
+    <button id="audit-btn" class="gear-btn hidden" type="button">📜 <span>操作日志</span></button>
+  </div>
+  <!-- 第三排：功能说明（小号字体，单行完整显示不换行） -->
+  <p class="text-xs text-slate-500 mt-2.5 whitespace-nowrap overflow-hidden text-ellipsis">选产品 + 选公众号 → AI 生成对应宣传软文 → 自动发布。勾选「API 自动发布」= 免扫码全自动；不勾选 = 扫码发表。</p>
+</header>
+
+<!-- 运行中任务 banner（任务跑时出现，醒目提示） -->
+<div id="run-banner" class="hidden mb-4 rounded-xl border-2 border-green-500 bg-green-50 p-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="spinner" style="border-color:#86efac;border-top-color:#15803d;"></span>
+    <div>
+      <div class="font-semibold text-green-800" id="run-banner-title">任务运行中</div>
+      <div class="text-sm text-green-700" id="run-banner-detail">已提交：<code class="font-mono">--</code> · 阶段：-- · 启动后请保持页面打开</div>
+    </div>
+  </div>
+  <div class="text-xs text-green-700" id="run-banner-time">00:00</div>
+</div>
+
+<!-- 输入区 -->
+<section class="bg-white rounded-xl shadow-sm border border-slate-200 p-3.5 mb-4">
+  <form id="run-form" class="space-y-2">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div>
+        <div class="field-label">产品 / 品牌（写软文的产品）</div>
+        <select id="product_id" class="field-input"></select>
+      </div>
+      <div>
+        <div class="field-label">目标公众号（发布到哪个号）</div>
+        <select id="account_id" class="field-input"></select>
+      </div>
+    </div>
+
+    <!-- 主题多选（勾选一个或多个，每个按"每主题篇数"各生成） -->
+    <div>
+      <div class="flex items-center justify-between mb-0.5">
+        <span class="field-label mb-0">选择主题（可多选，也可加自定义主题）</span>
+        <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
+      </div>
+      <div id="topic-list" class="flex flex-wrap gap-1"></div>
+      <div class="flex gap-1.5 mt-1.5">
+        <input id="new_topic" type="text" class="field-input" placeholder="输入自定义主题后点「＋」加入勾选（如：鼻炎、便秘、脱发…）" />
+        <button type="button" id="add-topic-tmp" class="flex-shrink-0 px-2 text-[11px] bg-slate-200 hover:bg-slate-300 rounded">＋ 加入</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      <div>
+        <div class="field-label">每主题篇数（每个勾选主题生成几篇）</div>
+        <input id="count" name="count" type="number" min="1" max="10" value="1" class="field-input" />
+      </div>
+      <div class="col-span-2">
+        <div class="field-label">作者 / Author</div>
+        <input id="author" name="author" type="text" value="" class="field-input" placeholder="随公众号带出，可改" />
+      </div>
+    </div>
+
+    <div>
+      <div class="field-label">额外提示（可选）<span class="text-slate-400 font-normal">— 产品介绍已选，可再补充想强调的角度</span></div>
+      <input id="extra" name="extra_hint" type="text" class="field-input" placeholder="如：针对30-40岁女性、突出送礼场景…" />
+    </div>
+
+    <!-- 发布方式勾选 -->
+    <div class="pt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+      <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
+        <input type="checkbox" id="use_api" class="w-3.5 h-3.5 text-blue-600 rounded cursor-pointer" />
+        <span>⚡ API 自动发布</span>
+        <span class="text-[11px] text-slate-400 font-normal">(免扫码·发到发表记录)</span>
+      </label>
+      <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
+        <input type="checkbox" id="notify_me" class="w-3.5 h-3.5 text-amber-600 rounded cursor-pointer" />
+        <span>📲 完成后微信通知</span>
+        <span class="text-[11px] text-slate-400 font-normal">(需配置企业微信群机器人)</span>
+      </label>
+      <span id="req-msg" class="text-xs text-slate-500 ml-1"></span>
+    </div>
+
+    <!-- 每日定时自动发布 -->
+    <div class="pt-2 pb-1 border-t border-dashed border-slate-200">
+      <div class="flex items-center flex-wrap gap-x-4 gap-y-1.5">
+        <label class="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+          <input type="checkbox" id="sched_enable" class="w-4 h-4 text-emerald-600 rounded cursor-pointer" checked />
+          <span>⏰ 每日定时自动发布</span>
+        </label>
+        <label class="inline-flex items-center gap-1.5 text-sm text-slate-600 select-none">
+          每天
+          <input type="time" id="sched_time" value="10:00" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+          开始
+        </label>
+        <span class="text-xs text-slate-400">到点自动发布「主题库全部主题 × 每主题 1 篇」，免扫码（API 自动发布）；每篇间隔 1 分钟（安全速率），单批最多 25 篇，通常一次就能发完</span>
+      </div>
+      <div id="sched-next" class="text-xs text-emerald-600 mt-1.5 flex items-center gap-2 flex-wrap"></div>
+      <div class="text-xs text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+        <span>💡 定时任务跑完会自动发通知；手动发布勾选上面「📲 完成后微信通知」即可。</span>
+        <button type="button" id="notify-test-btn" class="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer">🔔 发送测试通知</button>
+      </div>
+    </div>
+    <!-- 发布按钮：独占一行，宽度固定，位置恒定不乱跳 -->
+    <button id="run-btn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 transition text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm">
+      🚀 开始批量生成 + 发布
+    </button>
+    <p id="mode-tip" class="text-xs text-slate-400 mt-1">未勾选 = 扫码发表（文章进公众号主页）；勾选 API = 免扫码、发到账号「发表记录」、不推送给粉丝。<span class="text-amber-600">手动一次建议不超过 15 篇；若遇「请求频繁」会自动停止并保留草稿，建议改用每日定时分批发布。</span></p>
+  </form>
+</section>
+
+<!-- 任务列表 -->
+<section>
+  <h2 class="text-sm font-semibold text-slate-700 mb-2">📋 任务列表</h2>
+  <div id="jobs" class="space-y-2"></div>
+</section>
+
+</div>
+
+<!-- ===== AI 模型设置 齿轮弹层 ===== -->
+<div id="settings-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">⚙️ AI 模型设置</h3>
+      <button id="settings-close" class="text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <label>模型来源 / Provider</label>
+      <select id="provider"></select>
+
+      <label>Base URL <span class="font-normal text-slate-400">— OpenAI 兼容地址</span></label>
+      <input id="base_url" type="text" placeholder="https://api.deepseek.com/v1" />
+
+      <label>API Key <span class="font-normal text-slate-400">— 本地 Ollama 可留空</span></label>
+      <input id="api_key" type="password" placeholder="sk-... / 留空" autocomplete="off" />
+
+      <label>Model <span class="font-normal text-slate-400">— 模型名</span></label>
+      <input id="model" type="text" placeholder="deepseek-chat / qwen2.5:7b" list="model-suggest" />
+      <datalist id="model-suggest">
+        <option value="qwen2.5:7b"></option>
+        <option value="qwen2.5:14b"></option>
+        <option value="llama3:8b"></option>
+        <option value="llama3.1:8b"></option>
+        <option value="deepseek-chat"></option>
+        <option value="deepseek-reasoner"></option>
+      </datalist>
+      <div class="hint" id="provider-hint"></div>
+
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="settings-cancel" type="button" class="px-4 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50">取消</button>
+        <button id="settings-save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 产品库管理 modal ===== -->
+<div id="prod-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">📦 产品库管理</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="prod-modal">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <div class="grid grid-cols-1 gap-2">
+        <label>产品名</label>
+        <input id="prod_name" type="text" class="field-input" placeholder="如：百秘一梳" />
+        <label>产品介绍 / 卖点 / 品牌故事</label>
+        <textarea id="prod_intro" class="field-input" rows="5" placeholder="把产品来历、卖点、想突出的理念写在这里，AI 会据此生成软文…（典籍典故只需一两句白话提一下，别整段贴文言，否则 AI 会写得很"古风"）"></textarea>
+        <label>写作要求（可选，优先级最高）<span class="text-slate-400 font-normal">— 标题/钩子/人群/禁忌，写什么 AI 就照做</span></label>
+        <textarea id="prod_style" class="field-input" rows="4" placeholder="示例：
+【标题】必须标新立异、有悬念或反差，16-26字，禁止说明文式
+【人群】30-45岁女性，久坐熬夜、掉发失眠
+【钩子】结尾让人想评论"我也这样"，或想给爸妈买
+【转化】突出"天然/古法/送长辈有面子"，但绝不承诺疗效
+【禁忌】不写价格、不留购买链接、不模仿文言腔调"></textarea>
+        <div class="flex justify-end gap-2 mt-2">
+          <button id="prod-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加产品</button>
+        </div>
+      </div>
+      <div class="hint">已有产品列表：</div>
+      <div id="prod-list" class="space-y-2 max-h-56 overflow-auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 主题库管理 modal ===== -->
+<div id="topic-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">📚 主题库管理</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="topic-modal">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <div class="grid grid-cols-1 gap-2">
+        <label>主题词（如：偏头痛、失眠）</label>
+        <input id="topic_name" type="text" class="field-input" placeholder="如：鼻炎、便秘、肩颈酸痛…" />
+        <label>备注 / 默认写作角度（可选）</label>
+        <input id="topic_desc" type="text" class="field-input" placeholder="如：反复发作，用木梳头部按摩缓解（可留空）" />
+        <div class="flex justify-end gap-2 mt-2">
+          <button id="topic-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加主题</button>
+        </div>
+      </div>
+      <div class="hint">已有主题（可点删除）：</div>
+      <div id="topic-list-mgr" class="space-y-2 max-h-56 overflow-auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 公众号账号管理 modal ===== -->
+<div id="acct-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">📱 公众号账号管理</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="acct-modal">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <div class="grid grid-cols-1 gap-2">
+        <label>账号名称</label>
+        <input id="acct_name" type="text" class="field-input" placeholder="如：百秘一梳服务号" />
+        <label>AppID</label>
+        <input id="acct_appid" type="text" class="field-input" placeholder="wx1234567890abcdef" />
+        <label>AppSecret</label>
+        <input id="acct_secret" type="password" class="field-input" placeholder="在公众号后台-设置与开发获取" autocomplete="off" />
+        <label>默认作者</label>
+        <input id="acct_author" type="text" class="field-input" placeholder="如：百秘一梳" />
+        <div class="flex justify-end gap-2 mt-2">
+          <button id="acct-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加公众号</button>
+        </div>
+      </div>
+      <div class="hint">已有公众号列表：</div>
+      <div id="acct-list" class="space-y-2 max-h-56 overflow-auto"></div>
+      <div class="hint">提示：API 发布可直接发到任意已添加的号（免扫码，但非本机登录号不带原创/赞赏）；不勾 API 的扫码发布只能发到本机登录的那个号。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 二维码放大 modal ===== -->
+<div id="qr-modal" class="settings-modal hidden">
+  <div class="relative bg-white rounded-xl p-3 shadow-xl">
+    <button id="qr-close" class="absolute -top-3 -right-3 bg-white rounded-full shadow w-8 h-8 text-slate-500 hover:text-slate-800 text-xl leading-none">&times;</button>
+    <img id="qr-modal-img" class="qr-modal-img" src="" alt="二维码" />
+    <div class="text-center text-sm font-medium text-amber-600 mt-2">📲 请用微信扫码确认发布</div>
+    <div class="text-center text-xs text-slate-400 mt-0.5">扫完码浏览器会显示「✅ 已发布」横幅，此弹窗可关闭</div>
+  </div>
+</div>
+
+<!-- ===== 用户管理 modal（仅管理员可见） ===== -->
+<div id="users-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">👥 用户管理</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="users-modal">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <!-- 修改自己的密码（从主界面移到这里，2026-10-14） -->
+      <div class="grid grid-cols-1 gap-2 mb-3 p-2.5 border border-slate-200 rounded-lg bg-slate-50">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold text-slate-600">🔑 修改我的密码</div>
+          <button id="pw-btn" type="button" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">修改密码</button>
+        </div>
+        <div class="text-[11px] text-slate-400">点「修改密码」填写原密码与新密码；忘记密码可由管理员在下方「重置密码」列填写新密码后点保存。</div>
+      </div>
+      <div class="grid grid-cols-1 gap-2 mb-3 p-2.5 border border-slate-200 rounded-lg bg-slate-50">
+        <div class="text-xs font-semibold text-slate-600">新增用户</div>
+        <div class="grid grid-cols-2 gap-2">
+          <input id="nu_username" type="text" class="field-input" placeholder="用户名（3-32位字母数字）" />
+          <input id="nu_name" type="text" class="field-input" placeholder="姓名/备注（可选）" />
+          <input id="nu_password" type="password" class="field-input" placeholder="初始密码（≥8位）" />
+          <select id="nu_role" class="field-input">
+            <option value="editor">编辑（生成+发布）</option>
+            <option value="admin">管理员（全部权限）</option>
+            <option value="viewer">只读（只能看）</option>
+          </select>
+        </div>
+        <div class="flex justify-end"><button id="nu_add" type="button" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">＋ 添加用户</button></div>
+        <div id="nu_msg" class="text-xs text-slate-500"></div>
+      </div>
+      <div class="text-xs text-slate-500 mb-1">已有用户（改角色/停用/重置密码后点「保存」）</div>
+      <div id="users-list" class="space-y-1.5 max-h-72 overflow-auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 操作日志 modal（仅管理员可见） ===== -->
+<div id="audit-modal" class="settings-modal hidden">
+  <div class="settings-panel" style="max-width:860px">
+    <div class="flex items-center justify-between mb-2">
+      <h3 class="text-lg font-bold text-slate-900">📜 操作日志</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="audit-modal">&times;</button>
+    </div>
+    <div class="flex items-center gap-1.5 flex-wrap mb-2">
+      <input id="au_q" type="text" class="field-input" style="width:180px" placeholder="搜索：用户/说明/IP/动作" />
+      <select id="au_level" class="field-input" style="width:110px">
+        <option value="">全部级别</option><option value="info">普通</option>
+        <option value="warn">警告</option><option value="danger">危险</option>
+      </select>
+      <button id="au_search" type="button" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">查询</button>
+      <button id="au_export" type="button" class="px-3 py-1.5 text-xs bg-slate-200 hover:bg-slate-300 rounded">导出 CSV</button>
+      <span id="au_stat" class="text-xs text-slate-400 ml-auto"></span>
+    </div>
+    <div id="audit-list" class="overflow-auto" style="max-height:60vh"></div>
+    <div class="flex items-center justify-between mt-2">
+      <button id="au_prev" type="button" class="px-3 py-1 text-xs bg-slate-200 hover:bg-slate-300 rounded">← 上一页</button>
+      <span id="au_page" class="text-xs text-slate-500"></span>
+      <button id="au_next" type="button" class="px-3 py-1 text-xs bg-slate-200 hover:bg-slate-300 rounded">下一页 →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 修改我的密码 modal ===== -->
+<div id="pw-modal" class="settings-modal hidden">
+  <div class="settings-panel" style="max-width:380px">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">🔑 修改密码</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="pw-modal">&times;</button>
+    </div>
+    <div class="llm-fields">
+      <label>当前密码</label><input id="pw_old" type="password" class="field-input" />
+      <label>新密码（≥8 位）</label><input id="pw_new" type="password" class="field-input" />
+      <label>再输一次</label><input id="pw_new2" type="password" class="field-input" />
+      <div class="flex justify-end mt-2"><button id="pw_save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button></div>
+      <div id="pw_msg" class="text-xs text-slate-500"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const jobsEl = $('#jobs');
+const STORE_KEY = 'bias_publish_llm_v1';
+
+// ================= 登录态 / 用户 / 操作日志 =================
+let ME = null;
+
+
+async function loadMe(){
+  try {
+    const r = await fetch('/api/auth/me');
+    if (r.status === 401) { location.replace('/login'); return; }
+    ME = await r.json();
+  } catch (e) { return; }
+  $('#cur-user').innerHTML = `<b class="text-slate-700">${esc(ME.name || ME.username)}</b>`
+    + `<span class="text-slate-400">（${({admin:'管理员',editor:'编辑',viewer:'只读'})[ME.role] || ME.role}）</span>`;
+  if (ME.role === 'admin') { $('#users-btn')?.classList.remove('hidden'); $('#audit-btn')?.classList.remove('hidden'); }
+  if (ME.role === 'viewer') {
+    // 只读账号：隐藏所有写操作入口，避免点了才报 403
+    document.querySelectorAll('#run-form button[type=submit], #run-btn').forEach(el => {
+      el.disabled = true; el.title = '只读账号无权发布';
+    });
+  }
+  if (ME.must_change_pw) {
+    PW_FROM_USERS = false;   // 强制改密：保存后不回用户管理
+    setTimeout(() => { openModal('pw-modal'); $('#pw_msg').textContent = '当前为初始密码，请先修改密码。'; }, 600);
+  }
+}
+
+function openModal(id){ $('#'+id)?.classList.remove('hidden'); }
+function closeModal(id){ $('#'+id)?.classList.add('hidden'); }
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-close]');
+  if (c) closeModal(c.dataset.close);
+});
+
+$('#logout-btn')?.addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  location.replace('/login');
+});
+let PW_FROM_USERS = false;   // 改密码弹层是否是从「用户管理」里打开的（保存后回到用户管理）
+$('#pw-btn')?.addEventListener('click', () => {
+  PW_FROM_USERS = true;
+  closeModal('users-modal');
+  $('#pw_msg').textContent = '';
+  openModal('pw-modal');
+});
+$('#pw_save')?.addEventListener('click', async () => {
+  const a = $('#pw_old').value, b = $('#pw_new').value, c = $('#pw_new2').value;
+  const m = $('#pw_msg');
+  if (!a || !b) { m.textContent = '请填写完整'; m.className = 'text-xs text-rose-600'; return; }
+  if (b !== c) { m.textContent = '两次输入的新密码不一致'; m.className = 'text-xs text-rose-600'; return; }
+  const r = await fetch('/api/auth/password', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old_password: a, new_password: b }) });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) { m.textContent = '✅ 密码已修改'; m.className = 'text-xs text-green-600';
+    setTimeout(() => { closeModal('pw-modal'); $('#pw_old').value = $('#pw_new').value = $('#pw_new2').value = '';
+      if (PW_FROM_USERS && ME?.role === 'admin') { PW_FROM_USERS = false; openUsers(); } }, 900); }
+  else { m.textContent = '❌ ' + (d.detail || '修改失败'); m.className = 'text-xs text-rose-600'; }
+});
+
+// ---- 用户管理（管理员） ----
+const ROLE_LABEL = { admin: '管理员', editor: '编辑', viewer: '只读' };
+async function openUsers(){
+  openModal('users-modal');
+  const el = $('#users-list');
+  el.innerHTML = '<div class="text-xs text-slate-400">加载中…</div>';
+  const r = await fetch('/api/users');
+  if (!r.ok) { el.innerHTML = '<div class="text-xs text-rose-600">加载失败（需要管理员权限）</div>'; return; }
+  const list = await r.json();
+  el.innerHTML = list.map(u => `
+    <div class="flex items-center gap-2 p-2 border border-slate-200 rounded" data-uid="${u.id}">
+      <div style="min-width:96px"><div class="text-xs font-semibold text-slate-700">${esc(u.username)}</div>
+        <div class="text-[11px] text-slate-400">${esc(u.name)}${u.must_change_pw ? ' · 待改密' : ''}</div></div>
+      <input type="text" class="field-input" style="width:96px" value="${esc(u.name)}" data-f="name" placeholder="姓名" />
+      <select class="field-input" style="width:104px" data-f="role">
+        ${['admin','editor','viewer'].map(x => `<option value="${x}" ${u.role===x?'selected':''}>${ROLE_LABEL[x]}</option>`).join('')}
+      </select>
+      <select class="field-input" style="width:88px" data-f="is_active">
+        <option value="1" ${u.is_active?'selected':''}>启用</option>
+        <option value="0" ${u.is_active?'':'selected'}>停用</option>
+      </select>
+      <input type="password" class="field-input" style="width:120px" data-f="password" placeholder="重置密码(可空)" />
+      <button class="px-2 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700" data-act="save">保存</button>
+      <button class="px-2 py-1 text-[11px] bg-rose-100 text-rose-700 rounded hover:bg-rose-200" data-act="del">删除</button>
+      <span class="text-[11px] text-slate-400">上次登录 ${esc(u.last_login_at || '—')}</span>
+    </div>`).join('');
+  el.querySelectorAll('[data-act="save"]').forEach(b => b.addEventListener('click', async () => {
+    const row = b.closest('[data-uid]'); const uid = row.dataset.uid;
+    const body = { name: row.querySelector('[data-f=name]').value,
+                   role: row.querySelector('[data-f=role]').value,
+                   is_active: Number(row.querySelector('[data-f=is_active]').value),
+                   password: row.querySelector('[data-f=password]').value };
+    const rr = await fetch('/api/users/' + uid, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const dd = await rr.json().catch(() => ({}));
+    $('#nu_msg').textContent = rr.ok ? '✅ 已保存' : ('❌ ' + (dd.detail || '保存失败'));
+    $('#nu_msg').className = rr.ok ? 'text-xs text-green-600' : 'text-xs text-rose-600';
+    if (rr.ok) setTimeout(openUsers, 500);
+  }));
+  el.querySelectorAll('[data-act="del"]').forEach(b => b.addEventListener('click', async () => {
+    const row = b.closest('[data-uid]');
+    const un = row.querySelector('.text-xs.font-semibold').textContent;
+    if (!confirm(`确定删除用户「${un}」？该操作会记入操作日志。`)) return;
+    const rr = await fetch('/api/users/' + row.dataset.uid, { method: 'DELETE' });
+    const dd = await rr.json().catch(() => ({}));
+    $('#nu_msg').textContent = rr.ok ? '✅ 已删除' : ('❌ ' + (dd.detail || '删除失败'));
+    $('#nu_msg').className = rr.ok ? 'text-xs text-green-600' : 'text-xs text-rose-600';
+    if (rr.ok) setTimeout(openUsers, 400);
+  }));
+}
+$('#users-btn')?.addEventListener('click', openUsers);
+$('#nu_add')?.addEventListener('click', async () => {
+  const body = { username: $('#nu_username').value.trim(), name: $('#nu_name').value.trim(),
+                 password: $('#nu_password').value, role: $('#nu_role').value, is_active: 1 };
+  const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  $('#nu_msg').textContent = r.ok ? '✅ 已添加' : ('❌ ' + (d.detail || '添加失败'));
+  $('#nu_msg').className = r.ok ? 'text-xs text-green-600' : 'text-xs text-rose-600';
+  if (r.ok) { $('#nu_username').value = $('#nu_name').value = $('#nu_password').value = ''; openUsers(); }
+});
+
+// ---- 操作日志（管理员） ----
+let AU_OFFSET = 0, AU_LIMIT = 50;
+async function openAudit(reset){
+  if (reset !== false) AU_OFFSET = 0;
+  openModal('audit-modal');
+  const el = $('#audit-list');
+  el.innerHTML = '<div class="text-xs text-slate-400 p-2">加载中…</div>';
+  const p = new URLSearchParams({ limit: AU_LIMIT, offset: AU_OFFSET, q: $('#au_q').value.trim(), level: $('#au_level').value });
+  const r = await fetch('/api/audit?' + p.toString());
+  if (!r.ok) { el.innerHTML = '<div class="text-xs text-rose-600 p-2">加载失败（需要管理员权限）</div>'; return; }
+  const d = await r.json();
+  $('#au_stat').textContent = `共 ${d.total} 条`;
+  $('#au_page').textContent = `第 ${Math.floor(AU_OFFSET / AU_LIMIT) + 1} / ${Math.max(1, Math.ceil(d.total / AU_LIMIT))} 页`;
+  const color = lv => lv === 'danger' ? 'text-rose-600' : lv === 'warn' ? 'text-amber-600' : 'text-slate-600';
+  el.innerHTML = d.items.length ? `<table class="w-full text-[11.5px]" style="border-collapse:collapse">
+    <thead><tr class="text-left text-slate-500 border-b border-slate-200">
+      <th class="py-1 pr-2">时间</th><th class="pr-2">用户</th><th class="pr-2">操作</th>
+      <th class="pr-2">说明</th><th class="pr-2">IP</th></tr></thead><tbody>`
+    + d.items.map(it => `<tr class="border-b border-slate-100 ${it.result !== 'ok' ? 'bg-rose-50/40' : ''}">
+        <td class="py-1 pr-2 whitespace-nowrap text-slate-500">${esc(it.ts)}</td>
+        <td class="pr-2 whitespace-nowrap"><b>${esc(it.username)}</b>${it.role ? '<span class="text-slate-400">·' + esc(it.role) + '</span>' : ''}</td>
+        <td class="pr-2 whitespace-nowrap ${color(it.level)}">${esc(it.action_label)}${it.result !== 'ok' ? ' ❌' : ''}</td>
+        <td class="pr-2">${esc(it.detail)}</td>
+        <td class="pr-2 whitespace-nowrap text-slate-400">${esc(it.ip)}</td></tr>`).join('')
+    + '</tbody></table>' : '<div class="text-xs text-slate-400 p-2">没有符合条件的记录</div>';
+}
+$('#audit-btn')?.addEventListener('click', () => openAudit(true));
+$('#au_search')?.addEventListener('click', () => openAudit(true));
+$('#au_q')?.addEventListener('keydown', e => { if (e.key === 'Enter') openAudit(true); });
+$('#au_prev')?.addEventListener('click', () => { AU_OFFSET = Math.max(0, AU_OFFSET - AU_LIMIT); openAudit(false); });
+$('#au_next')?.addEventListener('click', () => { AU_OFFSET += AU_LIMIT; openAudit(false); });
+$('#au_export')?.addEventListener('click', () => { location.href = '/api/audit/export.csv'; });
+
+loadMe();
+
+// ================= Provider / 齿轮设置 =================
+const PROVIDER_HINTS = {
+  deepseek: '☁️ 云端。默认 https://api.deepseek.com/v1 · deepseek-chat · 需要 API Key',
+  ollama: '💻 本地。默认 http://localhost:11434/v1 · qwen2.5:7b / llama3:8b · 先运行 ollama serve',
+  openai_compat: '🔌 通用，兼容 vLLM / llama.cpp server / LM Studio / OneAPI。默认 http://localhost:8000/v1',
+};
+const PROVIDER_LABEL = { deepseek:'☁️ DeepSeek', ollama:'💻 Ollama 本地', openai_compat:'🔌 OpenAI 兼容' };
+let PROVIDER_LIST = [];
+
+function loadStored() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch(e) { return {}; }
+}
+function saveStored(o) {
+  localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadStored(), ...o }));
+}
+
+async function loadProviders() {
+  try {
+    const r = await fetch('/api/providers');
+    PROVIDER_LIST = await r.json();
+  } catch(e) { PROVIDER_LIST = [{id:'deepseek',label:'DeepSeek (云端)',default_base_url:'https://api.deepseek.com/v1',default_model:'deepseek-chat',needs_api_key:true}]; }
+  const sel = $('#provider');
+  sel.innerHTML = PROVIDER_LIST.map(p => `<option value="${p.id}">${p.label}</option>`).join('');
+  const saved = loadStored();
+  sel.value = saved.provider || 'deepseek';
+  applyProviderToFields();
+  refreshProviderTag(sel.value);   // provider 列表就绪后再刷新一次标签（补上默认模型名）
+}
+
+function applyProviderToFields() {
+  const id = $('#provider').value;
+  const p = PROVIDER_LIST.find(x => x.id === id) || {};
+  const saved = loadStored();
+  $('#provider-hint').textContent = PROVIDER_HINTS[id] || '';
+  // DeepSeek base_url 固定为官方地址，不可改
+  if (id === 'deepseek') {
+    $('#base_url').value = 'https://api.deepseek.com/v1';
+    $('#base_url').readOnly = true;
+    $('#base_url').title = 'DeepSeek 使用官方固定地址，不可修改';
+    // DeepSeek key 用服务端 .env（权威），前端不缓存不传旧 key，避免覆盖导致 401
+    $('#api_key').value = '';
+    $('#api_key').placeholder = '使用服务端 .env 配置，无需填写';
+    $('#api_key').readOnly = true;
+    $('#api_key').title = 'DeepSeek 自动使用服务器 .env 的 DEEPSEEK_API_KEY';
+  } else {
+    $('#base_url').value = saved.base_url || p.default_base_url || '';
+    $('#base_url').readOnly = false;
+    $('#base_url').title = '';
+    $('#api_key').value = saved.api_key || '';
+    $('#api_key').placeholder = 'sk-... / 留空';
+    $('#api_key').readOnly = false;
+    $('#api_key').title = '';
+  }
+  $('#model').value = saved.model || p.default_model || '';
+  refreshProviderTag(id);
+}
+function refreshProviderTag(id) {
+  const tag = $('#provider-tag');
+  const saved = loadStored();
+  const label = PROVIDER_LABEL[id] || id;
+  const p = PROVIDER_LIST.find(x => x.id === id) || {};
+  const modelName = saved.model || p.default_model || '';
+  // 只显示模型来源（不显示具体模型名，2026-10-14 用户要求）
+  tag.className = 'step-badge badge-provider-' + id;
+  tag.innerHTML = label;
+  tag.classList.remove('hidden');
+}
+
+// 齿轮开/关
+$('#gear-btn').addEventListener('click', () => { $('#settings-modal').classList.remove('hidden'); applyProviderToFields(); });
+$('#settings-close').addEventListener('click', closeSettings);
+$('#settings-cancel').addEventListener('click', closeSettings);
+function closeSettings() { $('#settings-modal').classList.add('hidden'); }
+$('#provider').addEventListener('change', () => { const id=$('#provider').value; const p=PROVIDER_LIST.find(x=>x.id===id)||{}; $('#base_url').value=p.default_base_url||''; $('#api_key').value=''; $('#model').value=p.default_model||''; });
+$('#settings-save').addEventListener('click', () => {
+  const o = { provider: $('#provider').value, base_url: $('#base_url').value.trim(), api_key: $('#api_key').value.trim(), model: $('#model').value.trim() };
+  saveStored(o);
+  refreshProviderTag(o.provider);
+  closeSettings();
+});
+
+// ================= 任务轮询（稳定版：只更新变化，不重建二维码/卡片） =================
+function badge(text, kind) { return `<span class="step-badge badge-${kind}">${text}</span>`; }
+function phaseLabel(p, cnt) {
+  const m = { queued:['已排队','pending'], generating:['<span class="spinner"></span> AI 生成中','running'], done:['✅ 全部完成','ok'], failed:['❌ 失败','fail'] };
+  if (p && p.startsWith('publishing_p')) {
+    const seq = p.split('_')[1]; // p1/p2/p3
+    return badge(`<span class="spinner"></span> 发布 ${seq}/${cnt||1}`, 'running');
+  }
+  const t = m[p] || [p || 'unknown','pending'];
+  return badge(t[0], t[1]);
+}
+function esc(s) { return String(s==null?'':s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+
+// 二维码图加载失败(后端尚未写好文件)时自动重试，直至成功
+function retryQR(img) {
+  if (!img) return;
+  if (img.dataset.qrRetrying === '1') return;       // 已有重试循环
+  img.dataset.qrRetrying = '1';
+  const base = img.dataset.qrSrc || img.getAttribute('src');
+  let tries = 0;
+  function attempt() {
+    if (!img.isConnected) return;                     // 已被移除则停止
+    if (img.complete && img.naturalWidth > 0) { img.dataset.qrRetrying=''; return; } // 成功
+    tries++;
+    if (tries > 40) { img.dataset.qrRetrying=''; return; } // 约80秒后放弃
+    img.onload = () => { img.dataset.qrRetrying=''; img.onload=null; };
+    img.onerror = () => { setTimeout(attempt, 2000); };
+    img.src = base + (base.includes('?') ? '&' : '?') + 'r=' + Date.now() + Math.floor(Math.random()*1000);
+  }
+  attempt();
+}
+// 二维码点击放大（绑定时保留原行为）
+function bindQRZoom() {
+  document.querySelectorAll('#qr-modal-img').forEach(()=>{});
+}
+
+function fmtTime(s){
+  // '2026-10-09T09:30:14.127163' → '2026-10-09 09:30'
+  if (!s) return '-';
+  return String(s).replace('T', ' ').slice(0, 16);
+}
+
+function articleBlockHTML(a) {
+  const st = a.status;
+  let b = badge(
+    st==='published' ? '✅ 已发布' : st==='failed' ? '❌ 失败' :
+    st==='skipped' ? '⏸ 限流跳过' :
+    st==='publishing' ? '<span class="spinner"></span> 发布中' : esc(st||'pending'),
+    st==='published' ? 'ok' : st==='failed' ? 'fail' : st==='publishing' ? 'running' : 'pending');
+  let qr = '';
+  if (a.qr_url && (st==='publishing')) {
+    qr = `<div class="mt-3 flex items-start gap-4">
+      <img class="qr-thumb" src="${a.qr_url}" data-zoom="${a.qr_url}" data-qr-src="${a.qr_url}" onerror="retryQR(this)" title="点击放大扫码" />
+      <div class="text-xs text-slate-500 leading-5">
+        <div class="text-amber-600 font-semibold mb-1">📲 请用微信扫码确认（点击二维码放大）</div>
+        <div>若二维码暂未出现，请稍候，将自动重试加载…</div>
+      </div>
+    </div>`;
+  }
+  return `<div class="border-t border-slate-100" data-seq="${a.seq}">
+    <div class="flex items-center justify-between">
+      <div class="art-line font-medium flex-1 pr-2">第 ${a.seq+1} 篇：${a.topic?`<span class="topic-chip text-blue-600 bg-blue-50 rounded mr-1">${esc(a.topic)}</span>`:''}${a.url?`<a href="${esc(a.url)}" target="_blank" rel="noopener" class="text-blue-600 hover:underline" title="点击查看文章">${esc(a.title||'(生成中…)')} ↗</a>`:esc(a.title||'(生成中…)')}</div>
+      <div data-slot="status">${b}</div>
+    </div>
+    ${a.body ? `<div class="art-snippet text-slate-500 line-clamp-1">${esc(a.body)}</div>` : ''}
+    ${a.error ? `<div class="art-error text-rose-600">${esc(a.error)}</div>` : ''}
+    ${qr}
+  </div>`;
+}
+
+function jobCardHTML(j) {
+  const cnt = j.count || j.articles?.length || 1;
+  const arts = (j.articles || []).map(articleBlockHTML).join('');
+  const saved = loadStored();
+  const prov = j.provider || saved.provider || 'deepseek';
+  const ptag = `<span class="step-badge badge-provider-${prov}">${PROVIDER_LABEL[prov]||prov}${j.llm_model?' · '+j.llm_model:''}</span>`;
+  const modeTag = j.use_api
+    ? '<span class="step-badge" style="background:#dcfce7;color:#166534">⚡ API 自动发布</span>'
+    : '<span class="step-badge" style="background:#FDEDEE;color:#B0000E">📲 扫码发表</span>';
+  return `<div class="bg-white shadow-sm border border-slate-200" data-job="${j.id}" data-created="${j.created_at}">
+    <div class="job-head flex items-center justify-between">
+      <div class="flex-1 pr-2">
+        <div class="job-title font-semibold text-slate-800 flex items-center gap-1.5 flex-wrap">${esc(j.topics_label || j.topic || '')} ${ptag} ${modeTag}</div>
+        <div class="job-meta text-slate-400">${j.id} · ${fmtTime(j.created_at)}</div>
+      </div>
+      <div data-slot="phase">${phaseLabel(j.phase, cnt)}</div>
+    </div>
+    ${arts || '<p class="text-xs text-slate-400 italic">等待 AI 生成…</p>'}
+    ${j.log?.length ? `<details><summary class="text-slate-500 cursor-pointer">查看日志（${j.log.length} 条）</summary><pre class="log mt-1">${(j.log||[]).slice(-15).map(esc).join('\n')}</pre></details>` : ''}
+  </div>`;
+}
+
+// 纯函数：对比两状态是否需刷新某卡片（内容级 diff，避免 DOM 重建）
+function statesEqual(a, b) {
+  if (a.phase !== b.phase) return false;
+  const aa = a.articles || [], bb = b.articles || [];
+  if (aa.length !== bb.length) return false;
+  for (let i=0;i<aa.length;i++){
+    if (aa[i].status !== bb[i].status) return false;
+    if ((aa[i].qr_url||'') !== (bb[i].qr_url||'')) return false;
+    if ((aa[i].title||'') !== (bb[i].title||'')) return false;
+    if ((aa[i].url||'') !== (bb[i].url||'')) return false;
+    if ((aa[i].error||'') !== (bb[i].error||'')) return false;
+    if ((aa[i].body||'') !== (bb[i].body||'')) return false;
+  }
+  return true;
+}
+
+const listCache = {};   // jobId → {phase, arts[]} 上次渲染快照
+const cardEls = {};     // jobId → 对应 DOM（保证存在性，不重建）
+
+async function tickAll() {
+  let jobs;
+  try { const r = await fetch('/api/jobs'); jobs = await r.json(); }
+  catch(e) { return; }
+  // 统一按 created_at 降序（最新在前），与后端一致
+  jobs.sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
+
+  const seen = new Set();
+  const orderById = [];   // 记录遍历顺序（用于末尾统一重排，保证最新永远在顶部）
+  for (const j of jobs) {
+    seen.add(j.id);
+    orderById.push(j.id);
+    let detail = null;
+    try { const r = await fetch('/api/jobs/'+j.id); detail = await r.json(); } catch(e){}
+    if (!detail) continue;
+
+    // 实时更新运行中任务的阶段
+    if (ACTIVE_JOB_ID && j.id === ACTIVE_JOB_ID) {
+      const ph = document.querySelector('#run-banner-phase');
+      if (ph) ph.textContent = detail.phase || '--';
+    }
+
+    // 当前提交的任务完成/失败 → 按钮恢复
+    if (ACTIVE_JOB_ID && j.id === ACTIVE_JOB_ID && (detail.phase === 'done' || detail.phase === 'failed')) {
+      const ok = detail.phase === 'done';
+      const failedN = (detail.articles||[]).filter(a => a.status === 'failed').length;
+      const msg = ok
+        ? `<span class="text-green-600">✅ 全部完成：${detail.articles.length} 篇已处理</span>`
+        : `<span class="text-rose-600">❌ 任务结束（${failedN} 篇失败），详见列表</span>`;
+      setRunBtnIdle(msg);
+      continue;
+    }
+
+    const prev = listCache[j.id];
+    let card = cardEls[j.id];
+    const needRedraw = !card || !prev || !statesEqual(prev, detail);
+    if (needRedraw) {
+      // 详情接口不返回 created_at（列表接口才有），不合并会显示 undefined
+      const merged = Object.assign({}, detail, { created_at: j.created_at || detail.created_at || '' });
+      const wrap = document.createElement('div');
+      wrap.innerHTML = jobCardHTML(merged);
+      const newCard = wrap.firstElementChild;
+      if (card && card.parentNode) card.replaceWith(newCard); else jobsEl.appendChild(newCard);
+      card = newCard; cardEls[j.id] = card;
+      listCache[j.id] = { phase: detail.phase, arts: (detail.articles||[]).map(a=>({status:a.status,qr_url:a.qr_url,title:a.title,error:a.error,body:a.body,url:a.url})) };
+    }
+  }
+  // 清空已消失 job
+  for (const id of Object.keys(cardEls)) { if (!seen.has(id)) { if(cardEls[id].parentNode) cardEls[id].remove(); delete cardEls[id]; delete listCache[id]; } }
+  if (seen.size===0) {
+    if (!jobsEl.querySelector('[data-job]')) jobsEl.innerHTML = '<p class="text-sm text-slate-400 italic">暂无任务。填写主题后点击按钮开始。</p>';
+  } else if (jobsEl.firstElementChild && jobsEl.firstElementChild.tagName==='P') {
+    jobsEl.querySelector('p')?.remove();
+  }
+  // 强制按后端顺序重排（最新在最上），防止 replace/重建导致顺序漂移
+  let frag = document.createDocumentFragment();
+  for (const id of orderById) { const el = cardEls[id]; if (el && el.parentNode) { jobsEl.removeChild(el); frag.appendChild(el); } }
+  jobsEl.appendChild(frag);
+  // 绑定二维码放大
+  jobsEl.querySelectorAll('img[data-zoom]').forEach(im => { if(!im.dataset.bound){ im.dataset.bound='1'; im.addEventListener('click', ()=>{ $('#qr-modal-img').src = im.dataset.zoom; $('#qr-modal').classList.remove('hidden'); }); } });
+}
+function insertInOrder(card) {
+  const created = card.getAttribute('data-created');
+  const cards = [...jobsEl.querySelectorAll('[data-job]')];
+  for (const c of cards) { const ts=c.getAttribute('data-created'); if (ts && ts>created) { jobsEl.insertBefore(card, c); return; } }
+  jobsEl.appendChild(card);
+}
+
+// ================= 提交（带运行状态反馈） =================
+let ACTIVE_JOB_ID = null;   // 当前正在运行的任务 id；完成后按钮恢复（localStorage 同步）
+let RUN_T0 = 0;             // 运行时长计时起点
+
+function setActiveJobId(jid) {
+  ACTIVE_JOB_ID = jid;
+  if (jid) localStorage.setItem('active_job', jid);
+  else localStorage.removeItem('active_job');
+}
+
+// 页面加载时恢复
+try { ACTIVE_JOB_ID = localStorage.getItem('active_job') || null; } catch(e){}
+
+function setRunBtnRunning() {
+  const b = $('#run-btn');
+  b.disabled = true;
+  b.className = 'w-full bg-green-500 hover:bg-green-600 transition text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm';
+  b.innerHTML = '<span class="spinner" style="border-top-color:#fff;border-color:rgba(255,255,255,.4);border-top-color:#fff;"></span> 生成并发布中…';
+  $('#run-banner').classList.remove('hidden');
+  $('#run-banner-title').textContent = '⏳ 任务运行中（按钮已锁）';
+  $('#run-banner-detail').innerHTML = '已提交：<code class="font-mono" id="run-banner-jid">--</code> · 阶段：<span id="run-banner-phase">初始化…</span> · 跑完按钮自动恢复';
+  RUN_T0 = Date.now();
+  if (window._runTicker) clearInterval(window._runTicker);
+  window._runTicker = setInterval(() => {
+    const sec = Math.floor((Date.now() - RUN_T0) / 1000);
+    $('#run-banner-time').textContent = `已运行 ${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
+  }, 1000);
+}
+function setRunBtnIdle(msg) {
+  const b = $('#run-btn');
+  b.disabled = false;
+  b.className = 'w-full bg-blue-600 hover:bg-blue-700 transition text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm';
+  b.innerHTML = '🚀 开始批量生成 + 发布';
+  $('#run-banner').classList.add('hidden');
+  if (window._runTicker) { clearInterval(window._runTicker); window._runTicker = null; }
+  if (msg) $('#req-msg').innerHTML = msg;
+  setActiveJobId(null);
+  RUN_T0 = 0;
+}
+
+$('#run-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (ACTIVE_JOB_ID) { $('#req-msg').textContent = '正在发布中，请等待完成…'; return; }
+  // 收集勾选主题
+  const pc = parseInt($('#count').value)||1;
+  const topics = [];
+  TOPICS.forEach(t => { if (SEL_TOPICS.has(t.id)) topics.push({ name: t.name, count: pc }); });
+  TMP_TOPICS.forEach(nm => { if (!topics.some(x => x.name===nm)) topics.push({ name: nm, count: pc }); });
+  if (!topics.length) return $('#req-msg').textContent = '请至少勾选一个主题（可点主题下方输入自定义主题）';
+  const account_id = parseInt($('#account_id').value) || 0;
+  const product_id = parseInt($('#product_id').value) || 0;
+  if (!account_id) { $('#req-msg').textContent = '请先选择目标公众号（可点右上「公众号」添加）'; return; }
+  if (!product_id) { $('#req-msg').textContent = '请先选择产品或产品介绍（可点右上「产品库」添加）'; return; }
+  const saved = loadStored();
+  const payload = {
+    topics, count: pc,
+    author: $('#author').value.trim() || '百秘一梳',
+    extra_hint: $('#extra').value,
+    provider: saved.provider||'deepseek',
+    api_key: (saved.provider||'deepseek') === 'deepseek' ? '' : (saved.api_key||''),
+    base_url: saved.base_url||'', model: saved.model||'',
+    use_api: $('#use_api').checked,
+    notify: $('#notify_me').checked,
+    account_id, product_id,
+  };
+  saveStored({ use_api: $('#use_api').checked, notify_me: $('#notify_me').checked, account_id, product_id });
+  setRunBtnRunning();
+  $('#req-msg').textContent = '提交中…';
+  try {
+    const r = await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail||'提交失败');
+    ACTIVE_JOB_ID = data.job_id;
+    setActiveJobId(data.job_id);
+    $('#run-banner-jid').textContent = data.job_id;
+    $('#req-msg').innerHTML = `<span class="text-blue-600">已创建任务：</span><code>${data.job_id}</code> <span class="text-slate-400">· 完成后按钮自动恢复</span>`;
+  } catch(err){ setRunBtnIdle(`<span class="text-rose-600">提交失败：${esc(err.message)}</span>`); }
+});
+
+// ================= 产品库 & 公众号管理 =================
+let PRODUCTS = [];      // [{id,name,intro,style}]
+let ACCOUNTS = [];      // [{id,name,appid,secret,author}]
+// ================= 主题库 =================
+let TOPICS = [];        // [{id,name,desc}]
+let SEL_TOPICS = new Set();          // 已勾选的库主题 id
+let TMP_TOPICS = [];                 // 临时自定义主题名（不入库）
+
+function renderTopicSel() {
+  const el = $('#topic-list');
+  const pc = parseInt($('#count').value)||1;
+  $('#topic-sel-hint').textContent = `共 ${SEL_TOPICS.size + TMP_TOPICS.length} 个主题 × ${pc} 篇 = ${(SEL_TOPICS.size+TMP_TOPICS.length)*pc} 篇`;
+  let html = TOPICS.map(t => {
+    const on = SEL_TOPICS.has(t.id);
+    return `<label class="inline-flex items-center gap-1 px-1.5 py-[1px] rounded border cursor-pointer select-none text-[11px] leading-4 ${on?'border-blue-500 bg-blue-50 text-blue-700':'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}">
+      <input type="checkbox" class="topic-cb w-3 h-3 accent-blue-600" data-id="${t.id}" data-name="${esc(t.name)}" ${on?'checked':''} />
+      ${esc(t.name)}
+    </label>`;
+  }).join('');
+  // 临时主题 chips
+  html += TMP_TOPICS.map(nm =>
+    `<label class="inline-flex items-center gap-1 px-1.5 py-[1px] rounded border cursor-pointer select-none text-[11px] leading-4 border-orange-400 bg-orange-50 text-orange-700">
+      <input type="checkbox" class="topic-cb tmp-cb w-3 h-3 accent-orange-600" data-id="" data-name="${esc(nm)}" checked />
+      ${esc(nm)} <span class="tmp-x text-orange-500 hover:text-orange-700 cursor-pointer font-bold" data-rm="${esc(nm)}">&times;</span>
+    </label>`).join('');
+  el.innerHTML = html || '<div class="text-xs text-slate-400">暂无主题，请在下方输入自定义主题，或点右上「📚 主题库」添加。</div>';
+  // checkbox change → 更新选中集合
+  el.querySelectorAll('.topic-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.classList.contains('tmp-cb')) {
+        const nm = cb.dataset.name;
+        if (!cb.checked) { TMP_TOPICS = TMP_TOPICS.filter(n => n !== nm); renderTopicSel(); }
+      } else {
+        const id = parseInt(cb.dataset.id);
+        if (cb.checked) SEL_TOPICS.add(id); else SEL_TOPICS.delete(id);
+        saveSelTopics();
+        renderTopicSel(); // 高亮更新
+      }
+    });
+  });
+  // 临时主题移除
+  el.querySelectorAll('.tmp-x').forEach(x => {
+    x.addEventListener('click', (e) => { e.stopPropagation(); TMP_TOPICS = TMP_TOPICS.filter(n => n !== x.dataset.rm); renderTopicSel(); });
+  });
+}
+
+async function loadTopics() {
+  try { TOPICS = await (await fetch('/api/topics')).json(); } catch(e){ TOPICS=[]; }
+  const ids = new Set(TOPICS.map(t=>t.id));
+  if (!window._topicInitDone) {
+    // 首次进入：默认勾选【所有主题】；若此前手动调整过选择（localStorage）则沿用
+    window._topicInitDone = true;
+    let savedSel = null;
+    try { savedSel = JSON.parse(localStorage.getItem('sel_topics_v1') || 'null'); } catch(_) {}
+    if (Array.isArray(savedSel)) {
+      SEL_TOPICS = new Set(savedSel.map(x=>parseInt(x)).filter(id => ids.has(id)));
+    } else {
+      TOPICS.forEach(t => SEL_TOPICS.add(t.id));   // 默认全选所有主题
+    }
+  } else {
+    // 保留仍存在的已选 id
+    SEL_TOPICS = new Set([...SEL_TOPICS].filter(id => ids.has(id)));
+  }
+  saveSelTopics();
+  renderTopicSel();
+  renderTopicMgr();
+}
+function saveSelTopics() {
+  try { localStorage.setItem('sel_topics_v1', JSON.stringify([...SEL_TOPICS])); } catch(_) {}
+}
+
+function renderTopicMgr() {
+  const el = $('#topic-list-mgr');
+  if (!TOPICS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无主题。</div>'; return; }
+  el.innerHTML = TOPICS.map(t => `<div id="row-topic-${t.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(t.name)}</div>
+      <div class="text-xs text-slate-500 truncate">${esc((t.desc||'')||'（无备注）')}</div></div>
+    <div class="flex-shrink-0 flex items-center gap-1 ml-2">
+      <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editTopicRow(${t.id})">编辑</button>
+      <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delTopic(${t.id})">删除</button>
+    </div>
+  </div>`).join('');
+}
+function editTopicRow(id) {
+  const t = TOPICS.find(x => x.id === id); if (!t) return;
+  const row = document.getElementById('row-topic-' + id);
+  if (!row) return;
+  row.innerHTML = `<div class="flex-1 min-w-0 space-y-1.5">
+      <input id="etn-${id}" class="field-input w-full text-sm" value="${esc(t.name)}" placeholder="主题名" />
+      <input id="etd-${id}" class="field-input w-full text-xs" value="${esc(t.desc || '')}" placeholder="备注（可选）" />
+    </div>
+    <div class="flex-shrink-0 flex items-center gap-2 ml-2">
+      <button class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700" onclick="saveTopicRow(${id})">保存</button>
+      <button class="text-xs bg-slate-200 text-slate-700 px-2.5 py-1 rounded hover:bg-slate-300" onclick="loadTopics()">取消</button>
+    </div>`;
+}
+async function saveTopicRow(id) {
+  const name = document.getElementById('etn-' + id).value.trim();
+  const desc = document.getElementById('etd-' + id).value.trim();
+  if (!name) { alert('主题名不能为空'); return; }
+  try {
+    await apiCall('/api/topics/' + id, { name, desc }, 'PUT');
+    loadTopics();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+async function delTopic(id) {
+  if (!confirm('删除该主题？')) return;
+  try { await apiCall('/api/topics/'+id, null, 'DELETE'); } catch(e){}
+  SEL_TOPICS.delete(id); loadTopics();
+}
+$('#topic-btn').addEventListener('click', () => { $('#topic-modal').classList.remove('hidden'); loadTopics(); });
+$('#topic-add').addEventListener('click', async () => {
+  const name = $('#topic_name').value.trim(), desc = $('#topic_desc').value.trim();
+  if (!name) { alert('请输入主题词'); return; }
+  try { await apiCall('/api/topics', { name, desc }); $('#topic_name').value=''; $('#topic_desc').value=''; loadTopics(); }
+  catch(e){ alert('添加失败：'+e.message); }
+});
+// 临时主题加入勾选
+$('#add-topic-tmp').addEventListener('click', addTmpTopic);
+$('#new_topic').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addTmpTopic(); } });
+function addTmpTopic() {
+  const v = $('#new_topic').value.trim();
+  if (!v) return;
+  if (TOPICS.some(t => t.name === v)) { // 若已在库则改为勾选它
+    const t = TOPICS.find(x => x.name === v);
+    SEL_TOPICS.add(t.id);
+    $('#new_topic').value='';
+    renderTopicSel();
+    return;
+  }
+  if (!TMP_TOPICS.includes(v)) TMP_TOPICS.push(v);
+  $('#new_topic').value='';
+  renderTopicSel();
+}
+
+
+async function loadProducts() {
+  try { PRODUCTS = await (await fetch('/api/products')).json(); } catch(e){ PRODUCTS=[]; }
+  const sel = $('#product_id');
+  const prev = parseInt(sel.value)||0;
+  sel.innerHTML = PRODUCTS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  if (PRODUCTS.length) sel.value = PRODUCTS.some(p=>p.id===prev) ? prev : PRODUCTS[0].id;
+  renderProdList();
+}
+async function loadAccounts() {
+  try { ACCOUNTS = await (await fetch('/api/accounts')).json(); } catch(e){ ACCOUNTS=[]; }
+  const sel = $('#account_id');
+  const prev = parseInt(sel.value)||0;
+  sel.innerHTML = ACCOUNTS.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  if (ACCOUNTS.length) sel.value = ACCOUNTS.some(a=>a.id===prev) ? prev : ACCOUNTS[0].id;
+  // 作者随公众号带出
+  syncAuthorFromAccount();
+  renderAcctList();
+}
+function syncAuthorFromAccount() {
+  const aid = parseInt($('#account_id').value)||0;
+  const a = ACCOUNTS.find(x => x.id===aid);
+  if (a && !$('#author').value.trim()) $('#author').value = a.author || '';
+}
+$('#account_id').addEventListener('change', () => { $('#author').value = ''; syncAuthorFromAccount(); });
+
+function renderProdList() {
+  const el = $('#prod-list');
+  if (!PRODUCTS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无产品，请在下方添加。</div>'; return; }
+  el.innerHTML = PRODUCTS.map(p => `<div id="row-prod-${p.id}" class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(p.name)}</div>
+      <div class="text-xs text-slate-500 truncate">${esc((p.intro||'').slice(0,80))}</div>
+      ${p.style ? `<div class="text-xs text-amber-600 truncate mt-0.5">✍️ 写作要求：${esc((p.style||'').replace(/\s+/g,' ').slice(0,70))}</div>` : ''}</div>
+    <div class="flex-shrink-0 flex items-center gap-1 ml-2">
+      <button class="text-xs text-blue-600 hover:text-blue-800" onclick="editProductRow(${p.id})">编辑</button>
+      <button class="text-xs text-rose-500 hover:text-rose-700" onclick="delProduct(${p.id})">删除</button>
+    </div>
+  </div>`).join('');
+}
+function editProductRow(id) {
+  const p = PRODUCTS.find(x => x.id === id); if (!p) return;
+  const row = document.getElementById('row-prod-' + id);
+  if (!row) return;
+  row.innerHTML = `<div class="flex-1 min-w-0 space-y-1.5">
+      <input id="epn-${id}" class="field-input w-full text-sm" value="${esc(p.name)}" placeholder="产品名" />
+      <textarea id="epi-${id}" rows="3" class="field-input w-full text-xs leading-relaxed" placeholder="产品介绍/卖点（可选）">${esc(p.intro || '')}</textarea>
+      <textarea id="eps-${id}" rows="3" class="field-input w-full text-xs leading-relaxed" placeholder="写作要求（可选）：标题风格/目标人群/钩子/禁忌…">${esc(p.style || '')}</textarea>
+    </div>
+    <div class="flex-shrink-0 flex items-center gap-2 ml-2">
+      <button class="text-xs bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700" onclick="saveProductRow(${id})">保存</button>
+      <button class="text-xs bg-slate-200 text-slate-700 px-2.5 py-1 rounded hover:bg-slate-300" onclick="loadProducts()">取消</button>
+    </div>`;
+}
+async function saveProductRow(id) {
+  const name = document.getElementById('epn-' + id).value.trim();
+  const intro = document.getElementById('epi-' + id).value.trim();
+  const style = document.getElementById('eps-' + id).value.trim();
+  if (!name) { alert('产品名不能为空'); return; }
+  try {
+    await apiCall('/api/products/' + id, { name, intro, style }, 'PUT');
+    loadProducts();
+  } catch(e) { alert('保存失败：' + e.message); }
+}
+function renderAcctList() {
+  const el = $('#acct-list');
+  if (!ACCOUNTS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无公众号，请在下方添加。</div>'; return; }
+  el.innerHTML = ACCOUNTS.map(a => `<div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded px-3 py-2">
+    <div class="flex-1 min-w-0"><div class="text-sm font-medium">${esc(a.name)}</div>
+      <div class="text-xs text-slate-500 truncate font-mono">${esc(a.appid)} · 作者:${esc(a.author||'')}</div></div>
+    <button class="text-xs text-rose-500 hover:text-rose-700 ml-2" onclick="delAccount(${a.id})">删除</button>
+  </div>`).join('');
+}
+async function delProduct(id) {
+  if (!confirm('删除该产品？')) return;
+  await fetch('/api/products/'+id, { method:'DELETE' }); loadProducts();
+}
+async function delAccount(id) {
+  if (!confirm('删除该公众号？')) return;
+  await fetch('/api/accounts/'+id, { method:'DELETE' }); loadAccounts();
+}
+async function apiCall(url, body, method) {
+  const r = await fetch(url,{method:method||'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+  const d = await r.json().catch(()=>({}));
+  if (!r.ok) throw new Error(d.detail || ('HTTP '+r.status));
+  return d;
+}
+$('#prod-add').addEventListener('click', async () => {
+  const name = $('#prod_name').value.trim(), intro = $('#prod_intro').value.trim();
+  const style = $('#prod_style').value.trim();
+  if (!name) { alert('请输入产品名'); return; }
+  try { await apiCall('/api/products', { name, intro, style }); $('#prod_name').value=''; $('#prod_intro').value=''; $('#prod_style').value=''; loadProducts(); }
+  catch(e){ alert('添加失败：'+e.message); }
+});
+$('#acct-add').addEventListener('click', async () => {
+  const name=$('#acct_name').value.trim(), appid=$('#acct_appid').value.trim(),
+        secret=$('#acct_secret').value.trim(), author=$('#acct_author').value.trim()||'百秘一梳';
+  if (!name||!appid||!secret){ alert('请填写账号名/AppID/AppSecret'); return; }
+  try { await apiCall('/api/accounts', { name, appid, secret, author }); $('#acct_name').value=''; $('#acct_appid').value=''; $('#acct_secret').value=''; $('#acct_author').value=''; loadAccounts(); }
+  catch(e){ alert('添加失败：'+e.message); }
+});
+// 弹层开关
+$('#prod-btn').addEventListener('click', () => { $('#prod-modal').classList.remove('hidden'); loadProducts(); });
+$('#acct-btn').addEventListener('click', () => { $('#acct-modal').classList.remove('hidden'); loadAccounts(); });
+document.querySelectorAll('.modal-x').forEach(x => x.addEventListener('click', () => { $('#'+x.dataset.close).classList.add('hidden'); }));
+['prod-modal','acct-modal','topic-modal'].forEach(mid => { const el=$('#'+mid); el.addEventListener('click', (e)=>{ if(e.target===el) el.classList.add('hidden'); }); });
+
+// 二维码 modal 关闭
+function closeQR(){ $('#qr-modal').classList.add('hidden'); }
+$('#qr-close').addEventListener('click', closeQR);
+$('#qr-modal').addEventListener('click', (e)=>{ if(e.target.id==='qr-modal') closeQR(); });
+
+// ===== 每日定时自动发布（默认每天 10:00，全主题×每主题1篇，API 免扫码） =====
+async function loadSchedule() {
+  try {
+    const r = await fetch('/api/schedule');
+    if (!r.ok) return;
+    const d = await r.json();
+    $('#sched_enable').checked = !!d.enabled;
+    $('#sched_time').value = d.time || '10:00';
+    renderSchedNext(d);
+  } catch(e){}
+}
+function renderSchedNext(d) {
+  const el = $('#sched-next');
+  if (!$('#sched_enable').checked) { el.textContent = '⏸ 定时已关闭（需要时点上方「🚀 开始批量生成 + 发布」即可手动发布）'; return; }
+  const t = $('#sched_time').value || '10:00';
+  const nr = (d && d.next_run) ? '· 下次：' + d.next_run : '';
+  el.textContent = `🕙 已开启：每天 ${t} 自动发布「主题库全部主题 × 每主题 1 篇」，每篇间隔 1 分钟（安全速率）、单批最多 25 篇（API 免扫码）${nr}`;
+}
+async function saveSchedule() {
+  const payload = {
+    enabled: $('#sched_enable').checked,
+    time: $('#sched_time').value || '10:00',
+    account_id: parseInt($('#account_id').value) || 0,
+    product_id: parseInt($('#product_id').value) || 0,
+  };
+  try {
+    const r = await fetch('/api/schedule', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (!r.ok) { $('#sched-next').textContent = '⚠️ ' + (d.detail || '定时保存失败'); return; }
+    renderSchedNext(d);
+  } catch(e) { $('#sched-next').textContent = '⚠️ 定时保存失败（服务未运行？）'; }
+}
+
+loadProviders();
+refreshProviderTag(loadStored().provider || 'deepseek');
+$('#use_api').checked = !!loadStored().use_api;
+// 「📲 完成后微信通知」默认【勾选】。
+// ⚠️ 2026-10-15：旧版本默认未勾选，而 saveStored 是"合并写入"，所以老浏览器里已经躺着
+//    notify_me:false —— 那个 false 不代表用户意图（只是旧默认值被存下来了），
+//    因此用 notify_pref_v1 标记做一次性迁移：老数据一律按"勾选"处理，之后再记住用户自己的选择。
+(function initNotifyPref(){
+  const st = loadStored();
+  if (!st.notify_pref_v1) {
+    $('#notify_me').checked = true;
+    saveStored({ notify_pref_v1: true, notify_me: true });
+  } else {
+    $('#notify_me').checked = !!st.notify_me;
+  }
+})();
+// 测试通知按钮：配置 ROBOT_WEBHOOK_URL 后，点一下手机微信应收到测试消息
+$('#notify-test-btn').addEventListener('click', async () => {
+  const b = $('#notify-test-btn');
+  b.disabled = true; b.textContent = '发送中…';
+  $('#req-msg').textContent = '';
+  try {
+    const r = await fetch('/api/notify/test');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || '发送失败');
+    $('#req-msg').textContent = '✅ ' + (d.msg || '已发送');
+  } catch(e) {
+    $('#req-msg').textContent = '⚠️ ' + e.message + '（请在 .env 配置 ROBOT_WEBHOOK_URL）';
+  }
+  b.disabled = false; b.textContent = '🔔 发送测试通知';
+});
+loadProducts();
+loadAccounts();
+loadTopics();
+loadSchedule();
+// 定时设置变更 → 立即保存（账号/产品同步快照，到点按所选发布）
+$('#sched_enable').addEventListener('change', saveSchedule);
+$('#sched_time').addEventListener('change', saveSchedule);
+$('#account_id').addEventListener('change', saveSchedule);
+$('#product_id').addEventListener('change', saveSchedule);
+// 每主题篇数变化 → 刷新已勾选主题的合计提示
+$('#count').addEventListener('change', () => { if ($('#topic-list')) renderTopicSel(); });
+// 恢复：若 localStorage 记了 active job，先拉一次，若已完成则清掉；未完成则显示 running 状态
+(async () => {
+  if (ACTIVE_JOB_ID) {
+    try {
+      const r = await fetch('/api/jobs/' + ACTIVE_JOB_ID);
+      if (r.ok) {
+        const d = await r.json();
+        if (d.phase === 'done' || d.phase === 'failed') {
+          // 已经结束，清掉 localStorage
+          setActiveJobId(null);
+        } else {
+          // 还在跑，恢复 running 状态
+          setRunBtnRunning();
+          $('#run-banner-jid').textContent = ACTIVE_JOB_ID;
+        }
+      } else {
+        // job 不存在（重启过？），清掉
+        setActiveJobId(null);
+      }
+    } catch (e) { setActiveJobId(null); }
+  }
+  tickAll();
+  setInterval(tickAll, 2500);
+})();
+</script>
+</body>
+</html>

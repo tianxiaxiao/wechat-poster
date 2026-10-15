@@ -1,0 +1,32 @@
+# 统一换行与文本属性：避免 Windows/Linux 协作时整文件 diff
+* text=auto eol=lf
+
+# 明确按文本处理
+*.py   text eol=lf
+*.js   text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf
+*.txt  text eol=lf
+Dockerfile text eol=lf
+
+# 二进制文件不做换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.gz   binary
+*.db   binary
+
+# GitHub 语言统计：把前端单文件 HTML 排除掉，避免 JS 占比被夸大
+app/static/index.html linguist-vendored
+app/wxcard/*.min.js   linguist-vendored
+app/wxcard/katex.min.js linguist-vendored
+app/wxcard/hljs.min.js  linguist-vendored
+app/wxcard/node_modules/** linguist-vendored

@@ -1,0 +1,31 @@
+# ============================================================
+# 叠加层：用 Cloudflare 隧道把内网 NAS 上的发布工具安全地暴露到公网
+#
+# 用法（与主 compose 叠加，在 docker/ 目录执行）：
+#   1. 在 Cloudflare 后台建好隧道，拿到一串 token（见 README-NAS.md 第六节）
+#   2. 把 token 填到 .env：TUNNEL_TOKEN=eyJhIjoi...
+#   3. docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+#
+# 说明：
+#   · 不需要在路由器上做端口映射、也不需要公网 IP
+#   · 隧道出口地址 https://<你的域名>  → 请务必在 Cloudflare 后台把该域名
+#     再做一层 Access（Zero Trust）保护，与站内账号密码形成双重校验
+#   · 想改成「内网只走隧道、不暴露端口」，可把主 compose 里的 ports 段注释掉，
+#     然后取消本文件 services.poster.networks 的注释，让 cloudflared 直接用服务名访问
+# ============================================================
+version: "3.8"   # 兼容群晖旧版 compose 校验器；新版会忽略
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: poster-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run      # token 由环境变量 TUNNEL_TOKEN 提供（见 docker/.env）
+    env_file:
+      - ./.env
+    depends_on:
+      - poster
+
+  # 可选：让 cloudflared 用容器名直连 poster（无需宿主机端口）
+  # poster:
+  #   networks: [default]

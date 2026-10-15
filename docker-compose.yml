@@ -1,0 +1,41 @@
+# ============================================================
+# 润致公众号自动发布工具 — 群晖 Container Manager「项目」专用 compose
+#
+# 为什么单独放一份：群晖的项目校验器要求
+#   ① build context 必须在**项目文件夹之内**（原来 docker/ 里那份用的是 context: .. 在文件夹外 → 报「文件格式无效」）
+#   ② 顶层带 version 键（新版 compose 会忽略它，仅为兼容群晖旧校验器）
+#
+# 用法（推荐）：
+#   1. NAS 上目录结构：/volume1/docker/poster/  ← 本项目根（含 app/、docker/、本文件）
+#   2. 在 /volume1/docker/poster/docker/.env 填好密钥（照 .env.example）
+#   3. 群晖 Container Manager → 项目 → 新增 → 路径选 /volume1/docker/poster
+#      ※ 不要选到 docker/ 子目录
+#   4. 或用 SSH（无需 compose，最稳，见 README 第三节方式一）：
+#      cd /volume1/docker/poster && sudo docker build -f docker/Dockerfile -t poster-api:1.1 . && sudo docker run ...
+# ============================================================
+version: "3.8"
+
+services:
+  poster:
+    build:
+      context: .                 # 项目根（本文件所在目录）
+      dockerfile: docker/Dockerfile
+    image: poster-api:1.1
+    container_name: wechat-poster
+    restart: unless-stopped      # NAS 重启后自动拉起，保证每日定时不中断
+    ports:
+      - "8765:8765"              # 内网访问端口；只用隧道可注释掉
+    environment:
+      - TZ=Asia/Shanghai         # 每日定时 09:30 按北京时间触发
+      - POSTER_DB=/srv/poster/app/data/poster.db
+      - COOKIE_SECURE=auto       # 经 Cloudflare https 访问时自动给会话 Cookie 加 Secure
+    env_file:
+      # 密钥就放在**项目根**的 .env（与 compose 同级）：
+      #   · compose v1 本来也强制要求在项目根找到 .env（做变量插值），缺了报「Couldn't find env file」
+      #   · 这里让 service 直接读同一个文件 → 一个文件到底，不再出现"两个 .env 谁生效"的歧义
+      # 部署前执行一次：cp docker/.env .env   （或把 docker/.env 的内容写进根 .env）
+      - ./.env
+    volumes:
+      # 数据目录：绑定到 NAS 可见目录，File Station 能直接看到，方便备份与迁移
+      - ./data:/srv/poster/app/data
+      # 想用 Docker 命名卷（数据藏在卷里）就改成：poster_data:/srv/poster/app/data

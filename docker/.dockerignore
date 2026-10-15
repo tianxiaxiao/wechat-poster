@@ -1,0 +1,9 @@
+# ⚠️ 本文件（docker/.dockerignore）**不会生效**，保留只为提醒。
+#
+# 生效的是**项目根目录**的 .dockerignore：因为 docker-compose.yml 里
+#   build:
+#     context: .            # 项目根
+# Docker 只读取 `<build context>/.dockerignore`，也就是项目根那份。
+#
+# 请只维护 `/volume1/docker/poster/.dockerignore`（项目根那个文件），
+# 需要修改排除规则时改那一份。

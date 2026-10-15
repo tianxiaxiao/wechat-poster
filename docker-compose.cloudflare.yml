@@ -1,0 +1,33 @@
+# ============================================================
+# 叠加层：用 Cloudflare 隧道把 NAS 上的发布工具安全暴露到公网
+#
+# ⚠️ 先确认你**还没有**现成的 cloudflared 隧道再用本文件！
+#    · 如果你已经跑着自己的 cloudflared（config.yaml / 控制台管理），
+#      只需在它的 ingress 里加一条 hostname → http://<本机IP>:8765 即可，
+#      **不要再起这个容器**，否则同一隧道会出现两个连接方，路由会互相干扰。
+#    · 只有「想用本仓库一并管理隧道」时才用下面的写法。
+#
+# 用法（项目根目录执行，与 docker-compose.yml 同级）：
+#   1. Cloudflare Zero Trust 建隧道拿到 token，填进 docker/.env：
+#        TUNNEL_TOKEN=eyJhIjoi...
+#      （变量名就叫 TUNNEL_TOKEN：cloudflared 官方镜像直接读这个环境变量，
+#        不依赖 compose 的 ${} 插值 —— 群晖的 docker-compose v1 不会用 docker/.env 做插值，会踩坑）
+#   2. 启动：
+#        sudo $(which docker-compose) -f docker-compose.yml -f docker-compose.cloudflare.yml up -d
+#      （本机没有 docker-compose、只有 docker build/run 的，见 README 第六节 6.2 的 docker run 写法）
+#   3. 隧道里 Public Hostname 的 Service 填：http://poster:8765（容器名:端口）
+#
+# ⚠️ 一定要在 Cloudflare Access 里给该域名加一层邮箱白名单，与站内账号密码形成双重校验
+# ============================================================
+version: "3.8"
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: poster-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run      # token 由环境变量 TUNNEL_TOKEN 提供
+    env_file:
+      - ./docker/.env
+    depends_on:
+      - poster
