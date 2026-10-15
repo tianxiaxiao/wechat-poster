@@ -157,6 +157,17 @@ def main():
         check("edA 可用号 = 自己的 + 共享（不含 admin私有号）",
               eda_row and set(eda_row["allowed_account_ids"]) == {eda_id, shared_id},
               f"allowed={eda_row and eda_row['allowed_account_ids']} 期望=({eda_id},{shared_id})")
+        # ★ 与后端校验同一套规则：管理员应能分配**全部**号（含他人私有号）
+        #   —— 早先这里漏了管理员这条，把号转给别人后管理员自己反而显示"不可分配"（2026-10-16 修）
+        #   判据用「响应里的全部号」而不是写死 id（临时库里还会有 .env 自动播种的号）
+        all_ids = {a["id"] for a in d.get("accounts", [])}
+        adm_row = next((u for u in d["users"] if u["username"] == "admin"), None)
+        check("★ 管理员可用号 = 全部（含 edA 私有号）",
+              adm_row and set(adm_row["allowed_account_ids"]) == all_ids,
+              f"allowed={adm_row and adm_row['allowed_account_ids']} 全部={sorted(all_ids)}")
+        check("★ 管理员可用号确实多于 edA（证明不是同一套过滤）",
+              adm_row and eda_row and len(adm_row["allowed_account_ids"]) > len(eda_row["allowed_account_ids"]),
+              f"admin={len(adm_row['allowed_account_ids'])} > edA={len(eda_row['allowed_account_ids'])}")
         check("返回公众号列表供勾选", any(a["id"] == shared_id for a in d.get("accounts", [])),
               f"accounts={[a['name'] for a in d.get('accounts', [])]}")
         check("含全局兜底定时信息", "global_fallback" in d and "enabled" in d["global_fallback"],

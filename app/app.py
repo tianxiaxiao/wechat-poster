@@ -1592,8 +1592,11 @@ async def api_admin_user_schedules(request: Request):
                     aids = [int(x) for x in json.loads(s.schedule_account_ids)]
                 except Exception:  # noqa: BLE001
                     aids = []
-            # 该用户可被授权使用的号：自己创建的 + 系统共享(owner_id IS NULL)
-            allowed = sorted(a.id for a in accounts if a.owner_id is None or a.owner_id == u.id)
+            # 该用户可被授权使用的号 —— 必须与后端校验（list_accounts_for_user）用**同一套规则**：
+            # 管理员 → 全部；其余 → 自己创建的 + 系统共享(owner_id IS NULL)。
+            # ⚠️ 早先这里少写了管理员这条，导致「把某个号转移给别的用户后，
+            #    管理员在定时总览里反而看到自己不可分配该号」（2026-10-16 修）
+            allowed = sorted(a.id for a in db_api.list_accounts_for_user(u.id, u.role == "admin", db))
             out.append({
                 "id": u.id,
                 "username": u.username,
