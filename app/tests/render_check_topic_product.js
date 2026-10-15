@@ -142,6 +142,35 @@ async function login(page, user, pw) {
           optText.includes("通用") && optText.includes("ZZ木梳") && optText.includes("ZZ美食街"),
           optText.slice(0, 60));
 
+    // ---- 排版健康度（量化断言）----
+    // 背景：列表/批量条曾误放在 .llm-fields 容器内，被
+    // `label{display:block}` + `input,select{width:100%}` 污染 →
+    // 勾选框被撑成 446px、主题名压成宽度 0 竖排、每行高 136px。这里用尺寸把它钉死。
+    console.log("\n[D2] 主题库排版健康度（量化断言，防回归）");
+    const layout = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll("#topic-list-mgr [id^=row-topic-]")];
+      const r0 = rows[0];
+      const cb = r0 && r0.querySelector(".topic-row-cb");
+      const nm = r0 && r0.querySelector(".text-sm.font-medium");
+      const bar = document.querySelector("#topic-bulk-bar");
+      const R = (el) => { const x = el.getBoundingClientRect(); return { w: Math.round(x.width), h: Math.round(x.height) }; };
+      return {
+        maxRowH: rows.length ? Math.max(...rows.map(r => Math.round(r.getBoundingClientRect().height))) : 0,
+        rowOverflow: r0 ? r0.scrollWidth - r0.clientWidth : 0,
+        cbW: cb ? R(cb).w : 0,
+        nameW: nm ? R(nm).w : 0,
+        nameH: nm ? R(nm).h : 0,
+        barH: bar ? R(bar).h : 0,
+      };
+    });
+    check("列表每行高度正常（≤70px，没被撑高）", layout.maxRowH > 0 && layout.maxRowH <= 70,
+          `最大 ${layout.maxRowH}px`);
+    check("行内无横向溢出", layout.rowOverflow <= 0, `溢出 ${layout.rowOverflow}px`);
+    check("勾选框尺寸正常（≤20px，没被 width:100% 撑满）", layout.cbW > 0 && layout.cbW <= 20, `${layout.cbW}px`);
+    check("主题名单行显示（未折成竖排）", layout.nameW > 100 && layout.nameH <= 30,
+          `w=${layout.nameW} h=${layout.nameH}`);
+    check("批量操作条单行排布（≤44px）", layout.barH > 0 && layout.barH <= 44, `${layout.barH}px`);
+
     // ---- 批量归类（勾选多条 → 一次改归属） ----
     console.log("\n[E] 主题库管理页：批量归类");
     // ⚠️ 弹层在 [D] 阶段已打开：先关闭再重开，保证干净状态（否则点击会被遮罩拦截）

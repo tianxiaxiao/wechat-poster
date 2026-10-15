@@ -357,19 +357,26 @@ button { line-height: 1.2; }
           <button id="topic-add" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">＋ 添加主题</button>
         </div>
       </div>
-      <!-- 批量归类：勾选多条 → 一次改归属 -->
-      <div class="flex items-center gap-2 flex-wrap bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs">
-        <label class="inline-flex items-center gap-1.5 cursor-pointer select-none font-medium text-slate-700">
+    </div>
+
+    <!-- 批量归类 + 主题列表 —— 【必须放在 .llm-fields 之外】！
+         否则 .llm-fields 的 `label{display:block}` 与 `input,select{width:100%}` 会：
+         · 把每行的勾选框撑成满宽的大方块  · 把「全选」的 label 挤成两行
+         · 下拉框撑满整行  · 主题名被压成宽度 0 的竖排
+         这就是「主题库排版混乱」的根因（2026-10-16 修） -->
+    <div class="mt-3 pt-2.5 border-t border-dashed border-slate-200">
+      <div id="topic-bulk-bar" class="flex items-center gap-1.5 flex-wrap bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs">
+        <label class="inline-flex items-center gap-1 cursor-pointer select-none font-medium text-slate-700 shrink-0">
           <input type="checkbox" id="topic-sel-all" class="w-3.5 h-3.5 accent-blue-600" /> 全选
         </label>
-        <span id="topic-sel-count" class="text-slate-500">已选 0 条</span>
-        <span class="text-slate-300">|</span>
-        <span class="text-slate-600">批量归类到</span>
-        <select id="topic-bulk-product" class="field-input" style="width:180px"></select>
-        <button id="topic-bulk-apply" type="button" class="px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">应用到已选</button>
+        <span id="topic-sel-count" class="text-slate-500 shrink-0">已选 0 条</span>
+        <span class="text-slate-300 shrink-0">|</span>
+        <span class="text-slate-600 shrink-0">归类到</span>
+        <select id="topic-bulk-product" class="field-input shrink-0" style="width:136px"></select>
+        <button id="topic-bulk-apply" type="button" class="shrink-0 px-2.5 py-1 bg-blue-600 text-white rounded hover:bg-blue-700">应用到已选</button>
         <span id="topic-bulk-msg" class="ml-auto"></span>
       </div>
-      <div class="hint">已有主题（勾选可批量归类；也可点「编辑」逐条改）：</div>
+      <div class="text-[11px] text-slate-400 mt-1.5">已有主题（勾选可批量归类；也可点「编辑」逐条改）：</div>
       <div id="topic-list-mgr" class="space-y-2 max-h-56 overflow-auto"></div>
     </div>
   </div>
@@ -1443,7 +1450,7 @@ function prodName(pid) {
 }
 function fillProductSelect(sel, selected) {
   if (!sel) return;
-  sel.innerHTML = `<option value="0">通用（所有产品都能用）</option>`
+  sel.innerHTML = `<option value="0">通用（不限产品）</option>`
     + (PRODUCTS || []).map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   const want = String(selected || 0);
   if ([...sel.options].some(o => o.value === want)) sel.value = want;
