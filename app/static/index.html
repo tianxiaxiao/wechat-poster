@@ -437,9 +437,12 @@ button { line-height: 1.2; }
         <label>账号名称</label>
         <input id="acct_name" type="text" class="field-input" placeholder="如：百秘一梳服务号" />
         <label>AppID</label>
-        <input id="acct_appid" type="text" class="field-input" placeholder="wx1234567890abcdef" />
+        <input id="acct_appid" type="text" class="field-input"
+               placeholder="在微信开发者平台-公众号/服务号-基础信息获取" />
+        <div class="hint">形如 wx1234567890abcdef（字母数字，18 位左右）</div>
         <label>AppSecret</label>
-        <input id="acct_secret" type="password" class="field-input" placeholder="在公众号后台-设置与开发获取" autocomplete="off" />
+        <input id="acct_secret" type="password" class="field-input"
+               placeholder="在微信开发者平台-公众号/服务号-基础信息获取" autocomplete="off" />
         <label>默认作者</label>
         <input id="acct_author" type="text" class="field-input" placeholder="如：百秘一梳" />
         <div class="flex justify-end gap-2 mt-2">

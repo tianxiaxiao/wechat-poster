@@ -327,6 +327,20 @@ const READ_IPBAR = () => {
           `采集到的宽度=${JSON.stringify(widths)}`);
     check("★ 第二排仍显示上次验证通过的 IP", /上次验证通过的 IP：/.test(after2.note2), after2.note2.slice(0, 50));
 
+    console.log("\n[C4] AppID / AppSecret 的获取位置提示（2026-10-16 改口径）");
+    const ph = await p.evaluate(() => ({
+      appid: document.getElementById("acct_appid").placeholder,
+      secret: document.getElementById("acct_secret").placeholder,
+      appidW: document.getElementById("acct_appid").clientWidth,
+    }));
+    check("★ AppID 输入框提示改为「微信开发者平台-公众号/服务号-基础信息」",
+          /微信开发者平台-公众号\/服务号-基础信息/.test(ph.appid), ph.appid);
+    check("★ AppSecret 输入框提示同样改口径",
+          /微信开发者平台-公众号\/服务号-基础信息/.test(ph.secret), ph.secret);
+    check("★ 旧口径「公众号后台-设置与开发」已不再出现",
+          !/公众号后台-设置与开发/.test(ph.appid + ph.secret), ph.appid);
+    check("提示不会被输入框截断（框够宽）", ph.appidW >= 300, `w=${ph.appidW}px`);
+
     console.log("\n[D] 保存模型设置后：旧结论标记过期（不继续显示绿/红）");
     await p.click('[data-close="acct-modal"]');
     await p.click("#acct-btn");                              // 关掉再开，回到设置弹层不方便，重开一次即可

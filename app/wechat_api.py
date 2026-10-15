@@ -73,7 +73,7 @@ def parse_probe_error(d: dict) -> dict:
                 f"请到公众号后台「设置与开发 → 安全中心 → IP白名单」把它加上"
                 f"（支持网段，如 106.85.0.0/16，加网段就不用频繁改）")
     elif errcode in (40013, 40125, 41004):
-        hint = "appid 或 AppSecret 不正确（请核对公众号后台「基本配置」里的值）"
+        hint = "appid 或 AppSecret 不正确（请核对「微信开发者平台-公众号/服务号-基础信息」里的值）"
     elif errcode == 40125:
         hint = "AppSecret 不正确"
     elif errcode:

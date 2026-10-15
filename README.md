@@ -210,7 +210,7 @@ launchctl load -w ~/Library/LaunchAgents/com.wechatposter.plist
 | `DEEPSEEK_API_KEY` | ✅* | DeepSeek 密钥（*用其它 provider 时不需要） |
 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | | 默认 `https://api.deepseek.com/v1` / `deepseek-chat` |
 | `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` | | 自建/第三方 OpenAI 兼容网关 |
-| `WX_APPID` / `WX_SECRET` | ✅ | 公众号 AppID / AppSecret（「设置与开发 → 基本配置」） |
+| `WX_APPID` / `WX_SECRET` | ✅ | 公众号 AppID / AppSecret（**微信开发者平台 → 公众号/服务号 → 基础信息** 获取） |
 | `WX_AUTHOR` | | 默认作者名 |
 | `WX_LOGIN_APPID` | | 扫码发表使用的账号 AppID，缺省取 `WX_APPID` |
 | `ROBOT_WEBHOOK_URL` | | 企业微信群机器人 Webhook（不填=不通知） |
@@ -340,7 +340,8 @@ node tests/render_check_status_ip.js       # 状态徽章颜色/位置、取 Key
 2. **公网部署必须加鉴权**：本项目自带登录 + 角色 + 操作日志，但更稳的做法是**再叠一层 Cloudflare Access**
    （邮箱白名单 / One-time PIN），或只在内网使用。**不要把 8765 端口直接映射到公网。**
 3. **微信 IP 白名单**：API 发布需要在公众号后台配置服务器出口 IP，否则报 `40164`。
-   路径是 **设置与开发 → 安全中心 → IP白名单**（注意不是「基本配置」——那里只有 AppID/AppSecret）。
+   路径是 **公众号后台 → 设置与开发 → 安全中心 → IP白名单**
+   （别和取 AppID/AppSecret 的地方搞混：那两个在**微信开发者平台 → 公众号/服务号 → 基础信息**）。
 4. **平台规则**：请遵守微信公众平台运营规范。本工具面向**你自己账号**的日常内容更新；
    请勿用于批量垃圾内容、刷量、绕过平台风控等用途——那会导致账号被封，与工具无关。
 5. **扫码发表的边界**：该模式通过浏览器自动化操作**你自己的**公众号后台（因为官方 API 不支持设置原创/赞赏）。
