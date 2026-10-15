@@ -422,7 +422,7 @@ button { line-height: 1.2; }
 
 <!-- ===== 用户管理 modal（仅管理员可见） ===== -->
 <div id="users-modal" class="settings-modal hidden">
-  <div class="settings-panel">
+  <div class="settings-panel" style="max-width:680px">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-lg font-bold text-slate-900">👥 用户管理</h3>
       <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="users-modal">&times;</button>
@@ -451,7 +451,13 @@ button { line-height: 1.2; }
         <div class="flex justify-end"><button id="nu_add" type="button" class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">＋ 添加用户</button></div>
         <div id="nu_msg" class="text-xs text-slate-500"></div>
       </div>
-      <div class="text-xs text-slate-500 mb-1">已有用户（改角色/停用/重置密码后点「保存」）</div>
+    </div>
+
+    <!-- 已有用户列表 —— 【放在 .llm-fields 之外】：
+         否则 .llm-fields 的 input/select 规则会改写行内控件的 padding/字体
+         （与上次"主题库排版混乱"是同一类问题，2026-10-16） -->
+    <div class="mt-3 pt-2.5 border-t border-dashed border-slate-200">
+      <div class="text-xs text-slate-500 mb-1.5">已有用户（改角色/停用/重置密码后点「保存」）</div>
       <div id="users-list" class="space-y-1.5 max-h-72 overflow-auto"></div>
     </div>
   </div>
@@ -614,22 +620,30 @@ async function openUsers(){
   const r = await fetch('/api/users');
   if (!r.ok) { el.innerHTML = '<div class="text-xs text-rose-600">加载失败（需要管理员权限）</div>'; return; }
   const list = await r.json();
+  // 两行布局：① 身份 + 可编辑字段 + 操作按钮 ② 重置密码 + 上次登录
+  // 原先 8 个元素挤在一行（内容 ~810px 塞进 470px）→ 横向溢出，「保存/删除」被挤出视野点不到。
   el.innerHTML = list.map(u => `
-    <div class="flex items-center gap-2 p-2 border border-slate-200 rounded" data-uid="${u.id}">
-      <div style="min-width:96px"><div class="text-xs font-semibold text-slate-700">${esc(u.username)}</div>
-        <div class="text-[11px] text-slate-400">${esc(u.name)}${u.must_change_pw ? ' · 待改密' : ''}</div></div>
-      <input type="text" class="field-input" style="width:96px" value="${esc(u.name)}" data-f="name" placeholder="姓名" />
-      <select class="field-input" style="width:104px" data-f="role">
-        ${['admin','editor','viewer'].map(x => `<option value="${x}" ${u.role===x?'selected':''}>${ROLE_LABEL[x]}</option>`).join('')}
-      </select>
-      <select class="field-input" style="width:88px" data-f="is_active">
-        <option value="1" ${u.is_active?'selected':''}>启用</option>
-        <option value="0" ${u.is_active?'':'selected'}>停用</option>
-      </select>
-      <input type="password" class="field-input" style="width:120px" data-f="password" placeholder="重置密码(可空)" />
-      <button class="px-2 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700" data-act="save">保存</button>
-      <button class="px-2 py-1 text-[11px] bg-rose-100 text-rose-700 rounded hover:bg-rose-200" data-act="del">删除</button>
-      <span class="text-[11px] text-slate-400">上次登录 ${esc(u.last_login_at || '—')}</span>
+    <div class="p-2 border border-slate-200 rounded" data-uid="${u.id}">
+      <div class="flex items-center gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="text-xs font-semibold text-slate-700 truncate" title="${esc(u.username)}">${esc(u.username)}</div>
+          <div class="text-[11px] text-slate-400 truncate">${esc(u.name || '—')}${u.must_change_pw ? ' · 待改密' : ''}</div>
+        </div>
+        <input type="text" class="field-input shrink-0" style="width:116px" value="${esc(u.name)}" data-f="name" placeholder="姓名" title="姓名" />
+        <select class="field-input shrink-0" style="width:92px" data-f="role" title="角色">
+          ${['admin','editor','viewer'].map(x => `<option value="${x}" ${u.role===x?'selected':''}>${ROLE_LABEL[x]}</option>`).join('')}
+        </select>
+        <select class="field-input shrink-0" style="width:80px" data-f="is_active" title="启用 / 停用">
+          <option value="1" ${u.is_active?'selected':''}>启用</option>
+          <option value="0" ${u.is_active?'':'selected'}>停用</option>
+        </select>
+        <button class="shrink-0 px-2.5 py-1 text-[11px] bg-blue-600 text-white rounded hover:bg-blue-700" data-act="save">保存</button>
+        <button class="shrink-0 px-2.5 py-1 text-[11px] bg-rose-100 text-rose-700 rounded hover:bg-rose-200" data-act="del">删除</button>
+      </div>
+      <div class="flex items-center gap-2 mt-1.5">
+        <input type="password" class="field-input" style="width:170px" data-f="password" placeholder="重置密码（留空=不改）" autocomplete="new-password" />
+        <span class="text-[11px] text-slate-400 truncate">上次登录 ${esc(u.last_login_at || '—')}</span>
+      </div>
     </div>`).join('');
   el.querySelectorAll('[data-act="save"]').forEach(b => b.addEventListener('click', async () => {
     const row = b.closest('[data-uid]'); const uid = row.dataset.uid;
