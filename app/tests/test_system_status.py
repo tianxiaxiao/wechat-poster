@@ -211,9 +211,14 @@ def main():
                   "微信开发者平台" in _wp and "基础信息" in _wp and "API IP白名单" in _wp, _wp[:70])
             check("★ 不再出现迁移前的旧路径（安全中心 / 基本配置）",
                   "安全中心" not in _wp and "基本配置" not in _wp, _wp[:70])
+            # 2026-10-16：用户要求直达「控制台」页（tab1=business&tab2=dev），不是 /platform 首页
             check("★ 打开的是微信开发者平台而不是公众平台后台",
                   "developers.weixin.qq.com" in (ip.get("whitelist_page") or "")
                   and "mp.weixin.qq.com" not in (ip.get("whitelist_page") or ""),
+                  str(ip.get("whitelist_page")))
+            check("★ 直达链接是控制台页 /console/index?tab1=business&tab2=dev",
+                  (ip.get("whitelist_page") or "")
+                  == "https://developers.weixin.qq.com/console/index?tab1=business&tab2=dev",
                   str(ip.get("whitelist_page")))
             check("含 ok_ip / changed_since_ok 字段", "ok_ip" in ip and "changed_since_ok" in ip)
             st, ip2 = adm.get("/api/system/public-ip")

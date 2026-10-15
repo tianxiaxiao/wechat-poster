@@ -1580,6 +1580,10 @@ _IP_CACHE = {"ip": "", "ts": 0.0}      # 公网出口 IP 短缓存
 _LLM_PROBE = {}                        # user_id      -> 最近一次 LLM 探测结果
 _WX_PROBE = {}                         # account_id   -> 最近一次微信凭证/白名单探测结果
 _IP_TTL = 60                           # 出口 IP 缓存秒数
+# 微信开发者平台「控制台」直达：tab1=business&tab2=dev 直接落到「我的业务 → 开发」视图，
+# 比 /platform 首页少一次跳转（用户 2026-10-16 指定的入口）
+WL_PAGE = "https://developers.weixin.qq.com/console/index?tab1=business&tab2=dev"
+WL_PATH = "微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单（支持网段，如 106.85.0.0/16）"
 _LLM_TTL = 15 * 60                     # LLM 探测结果保质期（超期标 stale，但仍先显示旧的）
 _WX_TTL = 30 * 60                      # 微信探测结果保质期
 _WX_MIN_INTERVAL = 15                  # 两次真实微信探测的最小间隔（防连点打爆接口）
@@ -1652,8 +1656,10 @@ def api_system_public_ip(request: Request, refresh: int = 0):
     """当前公网出口 IP（服务端探测）+ 上次验证可用的 IP + 白名单填写路径。
     给「📱 公众号管理」显示用：照着复制到微信开发者平台的 API IP 白名单即可。
     ⚠️ 2026-10-16：公众号的「开发接口管理」已整体迁移到**微信开发者平台**
-    （developers.weixin.qq.com/platform），AppID/AppSecret 与 API IP 白名单都在
-    「我的业务 → 公众号/服务号 → 基础信息」，旧路径（公众平台 → 设置与开发 → 安全中心）已废弃。"""
+    （developers.weixin.qq.com），AppID/AppSecret 与 API IP 白名单都在
+    「我的业务 → 公众号/服务号 → 基础信息」，旧路径（公众平台 → 设置与开发 → 安全中心）已废弃。
+    ⚠️ 直达链接用「控制台」页 /console/index?tab1=business&tab2=dev —— 直接进业务/开发视图，
+    比 /platform 首页少一次跳转。"""
     auth.need_login(request)
     ip = _egress_ip(refresh=bool(refresh))
     ok_ip = get_setting("ip_whitelist_ok_ip", "")
@@ -1662,8 +1668,8 @@ def api_system_public_ip(request: Request, refresh: int = 0):
         "cached_sec": int(max(0, time.time() - _IP_CACHE["ts"])) if _IP_CACHE["ip"] else 0,
         "ok_ip": ok_ip,
         "changed_since_ok": bool(ok_ip and ip and ok_ip != ip),
-        "whitelist_page": "https://developers.weixin.qq.com/platform/",
-        "whitelist_path": "微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单（支持网段，如 106.85.0.0/16）",
+        "whitelist_page": WL_PAGE,
+        "whitelist_path": WL_PATH,
     }
 
 
@@ -1737,7 +1743,7 @@ def api_system_status(request: Request, refresh: int = 0):
                 "stale": bool(lc.get("ts") and time.time() - lc["ts"] > _LLM_TTL)},
         "wechat": wx_out,
         "egress": {"ip": ip, "ok_ip": ok_ip, "changed_since_ok": changed,
-                   "whitelist_path": "微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单"},
+                   "whitelist_path": WL_PATH, "whitelist_page": WL_PAGE},
         "account": acc_info,
         "schedule": sched,
     }
@@ -2629,7 +2635,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                     if ip_blocked:
                         notify.send("## 🚨 发布失败：IP 白名单拦截（40164）",
                                     "微信报 40164：本机公网 IP 不在 API IP 白名单，重试无效。\n"
-                                    "请到微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单 加上日志里的 IP。",
+                                    "请到微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单 加上日志里的 IP。\n"
+                                    f"直达：{WL_PAGE}",
                                     use_markdown=True)
                     elif hit_limit and not plan.get("limit_alerted"):
                         plan["limit_alerted"] = True
@@ -2773,7 +2780,8 @@ def _ip_watchdog():
                  "",
                  "IP 白名单若未包含新 IP，定时发布会整批失败（40164）。",
                  "请到微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单 更新",
-                 "（支持 IP 段格式，如 106.85.0.0/16，加了网段就不用频繁改）。"])
+                 "（支持 IP 段格式，如 106.85.0.0/16，加了网段就不用频繁改）。",
+                 f"直达：{WL_PAGE}"])
     except Exception as e:
         logger.warning("IP 变更通知失败：%s", e)
 

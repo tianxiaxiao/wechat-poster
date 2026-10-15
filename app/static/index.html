@@ -425,7 +425,7 @@ button { line-height: 1.2; }
         <code id="acct-ip" class="shrink-0 inline-block w-[104px] text-center px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[12px] text-slate-800">查询中…</code>
         <button id="acct-ip-refresh" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">🔄 刷新</button>
         <button id="acct-ip-copy" type="button" class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded">📋 复制</button>
-        <a id="acct-mp-link" href="https://developers.weixin.qq.com/platform/" target="_blank" rel="noopener noreferrer"
+        <a id="acct-mp-link" href="https://developers.weixin.qq.com/console/index?tab1=business&amp;tab2=dev" target="_blank" rel="noopener noreferrer"
            class="shrink-0 px-2 py-0.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded no-underline">🏠 打开微信开发者平台</a>
       </div>
       <!-- 第一排：白名单填写路径；第二排：上次验证通过的 IP（漂移对比） -->
@@ -1043,6 +1043,9 @@ async function loadEgressIp(refresh) {
     const d = await r.json();
     ipEl.textContent = d.ip || '未取到';
     ipEl.dataset.ip = d.ip || '';
+    // 后台改了直达链接（比如控制台 tab 参数）时前端自动跟上，不用改两份
+    const wl = $('#acct-mp-link');
+    if (wl && d.whitelist_page) wl.href = d.whitelist_page;
     note.textContent = d.whitelist_path || '';
     note.className = 'mt-1 text-[11px] text-slate-400';
     let n2 = d.ok_ip ? '上次验证通过的 IP：' + d.ok_ip : '';

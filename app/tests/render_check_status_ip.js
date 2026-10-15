@@ -288,8 +288,10 @@ const READ_IPBAR = () => {
           JSON.stringify({ refresh: ib.refresh, copy: ib.copy, mp: ib.mp, barRight: ib.barRight }));
     // 2026-10-16：「开发接口管理」已迁移到微信开发者平台，旧入口 mp.weixin.qq.com 不再管白名单
     check("★ 按钮文案是「打开微信开发者平台」", /打开微信开发者平台/.test(ib.mpText), ib.mpText);
-    check("★ 指向 developers.weixin.qq.com/platform 且新标签打开",
-          /developers\.weixin\.qq\.com\/platform/.test(ib.mpHref) && ib.mpTarget === "_blank",
+    // 2026-10-16：用户指定直达「控制台」页（tab1=business&tab2=dev），比 /platform 首页少一次跳转
+    check("★ 指向开发者平台控制台页且新标签打开",
+          ib.mpHref === "https://developers.weixin.qq.com/console/index?tab1=business&tab2=dev"
+          && ib.mpTarget === "_blank",
           `${ib.mpHref} target=${ib.mpTarget}`);
     check("★ 第一排 = 白名单填写路径（含「API IP白名单」）", /API IP白名单/.test(ib.note), ib.note.slice(0, 60));
     check("★ 路径是「微信开发者平台 → 公众号/服务号 → 基础信息」",
@@ -360,6 +362,15 @@ const READ_IPBAR = () => {
     const bd2 = await p.evaluate(READ_BADGE);
     check("★ 保存后徽章回到「未体检 · 点击体检」（不沿用旧结论）",
           bd2.overall === "unknown" && /点击体检/.test(bd2.text), `${bd2.overall} ${bd2.text}`);
+
+    // ── [E] 静态：HTML 里写死的默认链接也要对（JS 会用接口值覆盖，光看渲染态会漏掉这里）──
+    console.log("\n[E] 静态检查：index.html 里按钮的默认 href");
+    const html = fs.readFileSync(path.join(APP_DIR, "static", "index.html"), "utf8");
+    check("★ 默认 href 就是控制台页（不是 /platform 首页）",
+          html.includes("https://developers.weixin.qq.com/console/index?tab1=business&amp;tab2=dev"),
+          "含 console/index 且 & 已转义为 &amp;");
+    check("★ HTML 里不再有 /platform 首页链接",
+          !/developers\.weixin\.qq\.com\/platform\/"/.test(html), "");
 
     console.log("\n" + "=".repeat(58));
     console.log(`=== 状态/取Key/出口IP 渲染断言：通过 ${pass} / 共 ${pass + fail}；失败 ${fail} ===`);

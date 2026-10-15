@@ -344,6 +344,8 @@ node tests/render_check_status_ip.js       # 状态徽章颜色/位置、取 Key
    （AppID / AppSecret 也在同一页的「开发密钥」里）。
    ⚠️ 公众号的「开发接口管理」已从公众平台迁移到微信开发者平台
    （<https://developers.weixin.qq.com/platform/>），旧路径「公众平台 → 设置与开发 → 安全中心」已废弃。
+   页面上的「🏠 打开微信开发者平台」按钮直达控制台页
+   <https://developers.weixin.qq.com/console/index?tab1=business&tab2=dev>。
 4. **平台规则**：请遵守微信公众平台运营规范。本工具面向**你自己账号**的日常内容更新；
    请勿用于批量垃圾内容、刷量、绕过平台风控等用途——那会导致账号被封，与工具无关。
 5. **扫码发表的边界**：该模式通过浏览器自动化操作**你自己的**公众号后台（因为官方 API 不支持设置原创/赞赏）。
