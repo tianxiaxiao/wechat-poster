@@ -211,6 +211,7 @@ button { line-height: 1.2; }
         <span>💡 定时任务跑完会自动发通知；手动发布勾选上面「📲 完成后微信通知」即可。</span>
         <button type="button" id="notify-test-btn" class="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer">🔔 发送测试通知</button>
       </div>
+      <div class="text-[11px] text-slate-400 mt-1">🧑 多用户部署：每位用户请到右上「⚙️ 模型设置 → 我的每日定时」单独配置【自己的模型/Key + 勾选要发的公众号】，互不干扰；此处的「全局定时」仅作为无人单独配置时的兜底。</div>
     </div>
     <!-- 发布按钮：独占一行，宽度固定，位置恒定不乱跳 -->
     <button id="run-btn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 transition text-white text-sm font-medium px-5 py-2.5 rounded-lg shadow-sm">
@@ -266,8 +267,31 @@ button { line-height: 1.2; }
 
       <div class="mt-4 flex justify-end gap-2">
         <button id="settings-cancel" type="button" class="px-4 py-2 text-sm border border-slate-300 rounded-lg hover:bg-slate-50">取消</button>
-        <button id="settings-save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存</button>
+        <button id="settings-save" type="button" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存我的设置</button>
       </div>
+    </div>
+
+    <!-- ===== 我的每日定时（多租户：每个用户独立配置 + 可勾选多个公众号同时发布） ===== -->
+    <div class="mt-5 pt-4 border-t border-dashed border-slate-200">
+      <h4 class="text-base font-semibold text-slate-800 mb-2">⏰ 我的每日定时发布</h4>
+      <div class="flex items-center flex-wrap gap-x-4 gap-y-1.5 mb-2">
+        <label class="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+          <input type="checkbox" id="user_sched_enable" class="w-4 h-4 text-emerald-600 rounded cursor-pointer" />
+          <span>开启我的每日定时</span>
+        </label>
+        <label class="inline-flex items-center gap-1.5 text-sm text-slate-600 select-none">
+          每天
+          <input type="time" id="user_sched_time" value="10:00" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+          开始
+        </label>
+        <label class="inline-flex items-center gap-1.5 text-sm text-slate-600 select-none">
+          产品
+          <select id="user_sched_product" class="border border-slate-300 rounded px-1.5 py-0.5 text-sm"></select>
+        </label>
+      </div>
+      <div class="text-xs text-slate-400 mb-1">勾选要定时发布的公众号（可多选，到点会同时发到每一个号）：</div>
+      <div id="user_acct_list" class="grid grid-cols-2 gap-1.5 max-h-40 overflow-auto pr-1"></div>
+      <div class="text-[11px] text-amber-600 mt-1.5">说明：这里的设置只对你本人生效，且使用上方你自己的模型与 API Key。系统另有「全局定时」仅供未单独配置的部署使用。</div>
     </div>
   </div>
 </div>
@@ -775,15 +799,78 @@ $('#preset-del').addEventListener('click', () => {
 function initPresets() { buildPresetOptions(); }
 
 // 齿轮开/关
-$('#gear-btn').addEventListener('click', () => { $('#settings-modal').classList.remove('hidden'); applyProviderToFields(); });
+$('#gear-btn').addEventListener('click', async () => {
+  $('#settings-modal').classList.remove('hidden');
+  await loadUserSettings();          // 先载入「我的设置」（模型 + 定时）
+  applyProviderToFields();           // 再以 localStorage（已被服务端值覆盖）刷新字段
+  refreshProviderTag($('#provider').value);
+});
 $('#settings-close').addEventListener('click', closeSettings);
 $('#settings-cancel').addEventListener('click', closeSettings);
 function closeSettings() { $('#settings-modal').classList.add('hidden'); }
 $('#provider').addEventListener('change', () => { const id=$('#provider').value; const p=PROVIDER_LIST.find(x=>x.id===id)||{}; $('#base_url').value=p.default_base_url||''; $('#api_key').value=''; $('#model').value=p.default_model||''; });
-$('#settings-save').addEventListener('click', () => {
-  const o = { provider: $('#provider').value, base_url: $('#base_url').value.trim(), api_key: $('#api_key').value.trim(), model: $('#model').value.trim() };
-  saveStored(o);
-  refreshProviderTag(o.provider);
+
+// ============ 我的设置：模型 + 每日定时（多租户，按用户隔离） ============
+async function loadUserSettings() {
+  if (!ACCOUNTS.length) { try { await loadAccounts(); } catch(e){} }
+  if (!PRODUCTS.length) { try { await loadProducts(); } catch(e){} }
+  try {
+    const r = await fetch('/api/user/settings');
+    if (!r.ok) return;
+    const s = await r.json();
+    // 把服务端存的个人 LLM 配置同步回 localStorage（作为手动发布的实时配置来源）
+    saveStored({
+      provider: s.llm_provider || loadStored().provider || 'deepseek',
+      base_url: s.llm_base_url || '',
+      api_key: s.llm_api_key || '',
+      model: s.llm_model || '',
+    });
+    $('#user_sched_enable').checked = !!s.schedule_enabled;
+    $('#user_sched_time').value = s.schedule_time || '10:00';
+    renderUserProdOptions(s.schedule_product_id);
+    renderUserAcctCheckboxes(s.schedule_account_ids || []);
+  } catch(e) { /* 离线/未登录时静默 */ }
+}
+function renderUserProdOptions(sel) {
+  const el = $('#user_sched_product');
+  el.innerHTML = (PRODUCTS && PRODUCTS.length)
+    ? PRODUCTS.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')
+    : '<option value="0">（默认第一个产品）</option>';
+  el.value = (PRODUCTS && PRODUCTS.some(p => p.id === sel)) ? sel : (PRODUCTS && PRODUCTS[0] ? PRODUCTS[0].id : 0);
+}
+function renderUserAcctCheckboxes(selectedIds) {
+  const ids = new Set((selectedIds || []).map(Number));
+  const el = $('#user_acct_list');
+  if (!ACCOUNTS.length) { el.innerHTML = '<div class="text-xs text-slate-400">暂无公众号，请先点右上「📱 公众号」添加。</div>'; return; }
+  el.innerHTML = ACCOUNTS.map(a => {
+    const on = ids.has(a.id);
+    const tag = a.mine ? '' : (a.owner_id == null ? ' <span class="text-[10px] text-slate-400">(共享)</span>'
+                                                        : ' <span class="text-[10px] text-slate-400">(他人)</span>');
+    return `<label class="inline-flex items-center gap-1.5 px-2 py-1 rounded border cursor-pointer select-none text-[12px] leading-4 ${on?'border-blue-500 bg-blue-50 text-blue-700':'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}">
+      <input type="checkbox" class="user-acct-cb w-3.5 h-3.5 accent-blue-600" data-id="${a.id}" ${on?'checked':''} />
+      ${esc(a.name)}${tag}
+    </label>`;
+  }).join('');
+}
+$('#settings-save').addEventListener('click', async () => {
+  const llm = { provider: $('#provider').value, base_url: $('#base_url').value.trim(),
+                api_key: $('#api_key').value.trim(), model: $('#model').value.trim() };
+  saveStored(llm);
+  refreshProviderTag(llm.provider);
+  const acctIds = Array.from(document.querySelectorAll('.user-acct-cb:checked')).map(cb => parseInt(cb.dataset.id));
+  const payload = {
+    llm_provider: llm.provider, llm_base_url: llm.base_url, llm_api_key: llm.api_key, llm_model: llm.model,
+    default_account_id: acctIds[0] || 0,
+    schedule_enabled: $('#user_sched_enable').checked,
+    schedule_time: $('#user_sched_time').value || '10:00',
+    schedule_account_ids: acctIds,
+    schedule_product_id: parseInt($('#user_sched_product').value) || 0,
+  };
+  try {
+    const r = await fetch('/api/user/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    if (!r.ok) { const d = await r.json().catch(()=>({})); toast('保存失败：' + (d.detail || r.status), 2600); return; }
+    toast('✅ 已保存「我的设置」（模型 + 每日定时）', 2400);
+  } catch(e) { toast('保存失败：' + e.message, 2600); return; }
   closeSettings();
 });
 
@@ -1403,6 +1490,7 @@ loadProducts();
 loadAccounts();
 loadTopics();
 loadSchedule();
+loadUserSettings();   // 载入「我的设置」：模型 + 每日定时（多租户，按登录用户隔离）
 // 定时设置变更 → 立即保存（账号/产品同步快照，到点按所选发布）
 $('#sched_enable').addEventListener('change', saveSchedule);
 $('#sched_time').addEventListener('change', saveSchedule);

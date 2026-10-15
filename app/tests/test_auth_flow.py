@@ -170,11 +170,15 @@ def main():
         st, d = ro.post("/api/users", {"username": "x1", "password": "Xxxxxxxx1", "role": "editor"})
         check("只读写用户管理被拒 → 403", st == 403, f"HTTP {st}")
 
-        print("\n[5] 密钥脱敏")
+        print("\n[5] 密钥脱敏（多租户：账号归创建者所有）")
+        # 编辑自建一个公众号：对自己可见且 AppSecret 脱敏；管理员可见明文
+        st_a, d_a = ed.post("/api/accounts",
+                            {"name": "编辑自用号", "appid": "wx_edit_mask_test", "secret": "edsecret123456", "author": "编辑"})
+        check("编辑可新增自己的公众号 → 200", st_a == 200, f"HTTP {st_a}")
         st, d = adm.get("/api/accounts")
-        adm_sec = (d[0].get("secret") or "") if isinstance(d, list) and d else ""
+        adm_sec = next((it.get("secret") or "" for it in (d or []) if it.get("appid") == "wx_edit_mask_test"), "")
         st2, d2 = ed.get("/api/accounts")
-        ed_sec = (d2[0].get("secret") or "") if isinstance(d2, list) and d2 else ""
+        ed_sec = next((it.get("secret") or "" for it in (d2 or []) if it.get("appid") == "wx_edit_mask_test"), "")
         check("编辑看到的 AppSecret 被脱敏（含 ****）", "****" in ed_sec and "****" not in adm_sec,
               f"admin={adm_sec[:14]}… editor={ed_sec[:14]}…")
 

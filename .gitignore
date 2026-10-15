@@ -95,3 +95,7 @@ app/static/logo_backup_*.png
 app/wxcard/preview_today*.html
 # 随手留的截图
 app/*.png
+
+# ---------- 四、Windows 保留名临时文件（环境副作用，绝不入库）----------
+nul
+NUL

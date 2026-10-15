@@ -2,7 +2,7 @@
 SQLite ORM — 持久化：账号、主题、文章、任务、用户、操作日志
 """
 import os
-from sqlalchemy import Column, Integer, String, Text, DateTime, create_engine
+from sqlalchemy import Column, Integer, String, Text, DateTime, create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import datetime as _dt
 from pathlib import Path
@@ -17,14 +17,31 @@ Base = declarative_base()
 
 
 class Account(Base):
-    """公众号账号"""
+    """公众号账号（owner_id 为归属用户；NULL = 系统共享，所有用户可见/可发）"""
     __tablename__ = "accounts"
     id = Column(Integer, primary_key=True)
     name = Column(String(64), nullable=False)  # 例如"百秘一梳服务号"
     appid = Column(String(64), nullable=False, unique=True)
     secret_enc = Column(Text, nullable=False)  # secret（本地工具，明文存）
     author = Column(String(16), nullable=False, default="百秘一梳")  # 该号默认作者
+    owner_id = Column(Integer, index=True)      # 归属用户 User.id；NULL = 系统共享
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
+
+
+class UserSetting(Base):
+    """每用户私有配置（2026-10-15 多用户多租户改造）：自己的 LLM 模型/Key + 自己的定时计划"""
+    __tablename__ = "user_settings"
+    user_id = Column(Integer, primary_key=True)              # 关联 User.id
+    llm_provider = Column(String(32), default="deepseek")    # 该用户默认 provider
+    llm_base_url = Column(String(255), default="")           # 该用户默认 base_url
+    llm_model = Column(String(255), default="")              # 该用户默认 model
+    llm_api_key = Column(Text, default="")                   # 该用户自己的 API Key（各人消耗各人的）
+    default_account_id = Column(Integer, default=0)          # 默认发布到的公众号
+    schedule_enabled = Column(Integer, default=0)            # 该用户是否开启每日定时
+    schedule_time = Column(String(8), default="10:00")       # 定时时刻 HH:MM
+    schedule_account_ids = Column(Text, default="")          # JSON list[int]：勾选要定时发布的自有公众号（空=用 default_account_id）
+    schedule_product_id = Column(Integer, default=0)         # 定时使用的产品
+    schedule_last_run_date = Column(String(16), default="")  # 当天已触发日期，防重复
 
 
 class Product(Base):
@@ -58,6 +75,7 @@ class Article(Base):
     cover_path = Column(String(512))
     status = Column(String(32))  # pending/generated/publishing/published/failed
     publish_id = Column(String(64))  # 微信 article_id
+    account_id = Column(Integer, default=0)  # 发布到的公众号（多租户去重用）
     error = Column(Text)
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
     updated_at = Column(DateTime, default=_dt.datetime.utcnow, onupdate=_dt.datetime.utcnow)
@@ -127,6 +145,64 @@ def set_setting(key: str, value: str):
 
 def init_db():
     Base.metadata.create_all(engine)
+    _migrate_schema()
+
+
+def _migrate_schema():
+    """兼容旧库：给 accounts 补 owner_id 列（create_all 不会给已存在表加列）"""
+    try:
+        with engine.connect() as c:
+            cols = [r[1] for r in c.execute(text("PRAGMA table_info(accounts)")).fetchall()]
+            if "owner_id" not in cols:
+                c.execute(text("ALTER TABLE accounts ADD COLUMN owner_id INTEGER"))
+                c.commit()
+            cols2 = [r[1] for r in c.execute(text("PRAGMA table_info(articles)")).fetchall()]
+            if "account_id" not in cols2:
+                c.execute(text("ALTER TABLE articles ADD COLUMN account_id INTEGER DEFAULT 0"))
+                c.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[migrate] accounts.owner_id 迁移失败（可忽略）: {e}")
+
+
+# ---- 每用户配置便捷函数 ----
+def get_user_setting(user_id: int, db: Session = None):
+    s = db or SessionLocal()
+    try:
+        return s.get(UserSetting, user_id)
+    finally:
+        if db is None:
+            s.close()
+
+
+def upsert_user_setting(user_id: int, db: Session = None, **fields) -> UserSetting:
+    s = db or SessionLocal()
+    try:
+        r = s.get(UserSetting, user_id)
+        if not r:
+            r = UserSetting(user_id=user_id)
+            s.add(r)
+        for k, v in fields.items():
+            if hasattr(r, k):
+                setattr(r, k, v)
+        s.commit()
+        s.refresh(r)
+        return r
+    finally:
+        if db is None:
+            s.close()
+
+
+def list_accounts_for_user(user_id: int, is_admin: bool, db: Session = None):
+    """列出某用户可见的公众号：管理员看全部；普通用户看自己的 + 系统共享(NULL)。"""
+    s = db or SessionLocal()
+    try:
+        q = s.query(Account)
+        if not is_admin:
+            q = q.filter((Account.owner_id == user_id) | (Account.owner_id.is_(None)))
+        return q.order_by(Account.id).all()
+    finally:
+        if db is None:
+            s.close()
 
 
 # ---- Product / Account CRUD 便捷函数 ----

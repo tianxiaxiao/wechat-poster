@@ -25,7 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from db import (init_db, Article, Account, Product, Topic, SessionLocal, get_setting, set_setting,
-                User, AuditLog)
+                User, AuditLog, UserSetting)
+import db as db_api
 import auth
 import audit
 import llm
@@ -619,6 +620,7 @@ async def lifespan(app: FastAPI):
     _seed_defaults()
     _load_sched()   # 读取每日定时设置（默认每天 10:00）
     auth.ensure_admin()   # 首次启动创建管理员（用户名/密码见 README 或 ADMIN_INIT_PASSWORD）
+    _migrate_account_owners()  # 旧库兼容：未归属公众号过户给管理员
     threading.Thread(target=_scheduler_loop, daemon=True, name="daily-scheduler").start()
     # 启动后 20 秒做一次卡片渲染自检（node 版本变化会导致渲染静默降级，2026-10-06 踩过）
     threading.Thread(target=lambda: (time.sleep(20), _ensure_card_render_ok("服务启动")),
@@ -1084,17 +1086,18 @@ async def del_topic_api(tid: int, request: Request):
 # ========== 公众号账号 CRUD ==========
 @app.get("/api/accounts")
 async def list_accounts_api(request: Request):
-    """账号列表：AppSecret 只对管理员返回，其余角色脱敏（公网部署避免密钥泄露）"""
+    """账号列表：仅返回当前用户可见的公众号（自己的 + 系统共享NULL）；AppSecret 只对管理员返回"""
     u = auth.need_login(request)
     is_admin = u["role"] == "admin"
     db = SessionLocal()
     try:
         out = []
-        for a in db.query(Account).order_by(Account.id).all():
+        for a in db_api.list_accounts_for_user(u["id"], is_admin, db):
             sec = a.secret_enc or ""
             out.append({"id": a.id, "name": a.name, "appid": a.appid,
                         "secret": sec if is_admin else (sec[:4] + "****" if sec else ""),
-                        "secret_masked": not is_admin, "author": a.author})
+                        "secret_masked": not is_admin, "author": a.author,
+                        "owner_id": a.owner_id, "mine": (a.owner_id == u["id"])})
         return out
     finally:
         db.close()
@@ -1102,7 +1105,7 @@ async def list_accounts_api(request: Request):
 
 @app.post("/api/accounts")
 async def add_account_api(a: AccountIn, request: Request):
-    me = auth.need_role(request, "admin")     # 含 AppSecret，仅管理员可改
+    me = auth.need_role(request, "editor")    # 每个登录用户都能添加自己的公众号
     if not a.name.strip() or not a.appid.strip() or not a.secret.strip():
         raise HTTPException(400, "账号名/appid/secret 不能为空")
     db = SessionLocal()
@@ -1111,7 +1114,8 @@ async def add_account_api(a: AccountIn, request: Request):
         if exists:
             raise HTTPException(400, f"已存在 appid={a.appid.strip()} 的公众号")
         acct = Account(name=a.name.strip(), appid=a.appid.strip(),
-                       secret_enc=a.secret.strip(), author=a.author.strip() or "百秘一梳")
+                       secret_enc=a.secret.strip(), author=a.author.strip() or "百秘一梳",
+                       owner_id=me["id"])
         db.add(acct); db.commit(); db.refresh(acct)
         audit.audit(request, "account.create", f"新增公众号「{acct.name}」(appid={acct.appid})",
                     user=me, level="warn")
@@ -1122,14 +1126,18 @@ async def add_account_api(a: AccountIn, request: Request):
 
 @app.delete("/api/accounts/{aid}")
 async def del_account_api(aid: int, request: Request):
-    me = auth.need_role(request, "admin")
+    me = auth.need_login(request)
+    is_admin = me["role"] == "admin"
     db = SessionLocal()
     try:
         acct = db.query(Account).filter(Account.id == aid).first()
-        if acct:
-            nm = acct.name
-            db.delete(acct); db.commit()
-            audit.audit(request, "account.delete", f"删除公众号「{nm}」", user=me, level="warn")
+        if not acct:
+            return {"ok": True}
+        if not is_admin and acct.owner_id != me["id"]:
+            raise HTTPException(403, "只能删除你自己的公众号")
+        nm = acct.name
+        db.delete(acct); db.commit()
+        audit.audit(request, "account.delete", f"删除公众号「{nm}」", user=me, level="warn")
         return {"ok": True}
     finally:
         db.close()
@@ -1139,6 +1147,73 @@ async def del_account_api(aid: int, request: Request):
 async def api_providers():
     """返回可选 LLM provider 列表（含默认值）供前端下拉框使用"""
     return llm.list_providers()
+
+
+# ========== 每用户私有设置（多租户：自己的模型/Key + 自己的定时） ==========
+class UserSettingsIn(BaseModel):
+    llm_provider: str = "deepseek"
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""          # 该用户自己的 Key（留空=用 provider 默认/服务端配置）
+    default_account_id: int = 0
+    schedule_enabled: bool = False
+    schedule_time: str = "10:00"
+    schedule_account_ids: list = []   # 勾选定时发布的自有公众号 id 列表
+    schedule_product_id: int = 0
+
+
+@app.get("/api/user/settings")
+async def api_user_settings_get(request: Request):
+    """返回当前登录用户的私有设置（模型/Key + 定时）。Key 仅本人可见。"""
+    me = auth.need_login(request)
+    s = db_api.get_user_setting(me["id"])
+    return {
+        "llm_provider": s.llm_provider if s else "deepseek",
+        "llm_base_url": s.llm_base_url if s else "",
+        "llm_model": s.llm_model if s else "",
+        "llm_api_key": s.llm_api_key if s else "",
+        "default_account_id": s.default_account_id if s else 0,
+        "schedule_enabled": bool(s.schedule_enabled) if s else False,
+        "schedule_time": s.schedule_time if s else "10:00",
+        "schedule_account_ids": (json.loads(s.schedule_account_ids) if s and s.schedule_account_ids else []) if s else [],
+        "schedule_product_id": s.schedule_product_id if s else 0,
+    }
+
+
+@app.post("/api/user/settings")
+async def api_user_settings_set(body: UserSettingsIn, request: Request):
+    me = auth.need_login(request)
+    is_admin = me["role"] == "admin"
+    if body.llm_provider not in llm.PROVIDERS:
+        raise HTTPException(400, f"provider 必须是 {list(llm.PROVIDERS)} 之一")
+    t = (body.schedule_time or "").strip()
+    if t and not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", t):
+        raise HTTPException(400, "定时时间格式应为 HH:MM，如 10:00")
+    # 校验勾选的公众号都属于该用户（或系统共享）
+    try:
+        aids = [int(x) for x in (body.schedule_account_ids or [])]
+    except Exception:
+        raise HTTPException(400, "schedule_account_ids 必须是数字列表")
+    db = SessionLocal()
+    try:
+        owned = {a.id for a in db_api.list_accounts_for_user(me["id"], is_admin, db)}
+        bad = [x for x in aids if x not in owned]
+        if bad:
+            raise HTTPException(400, f"以下公众号不属于你或无权限：{bad}")
+        db_api.upsert_user_setting(
+            me["id"], db=db,
+            llm_provider=body.llm_provider, llm_base_url=(body.llm_base_url or "").strip(),
+            llm_model=(body.llm_model or "").strip(), llm_api_key=body.llm_api_key or "",
+            default_account_id=int(body.default_account_id or 0),
+            schedule_enabled=1 if body.schedule_enabled else 0,
+            schedule_time=t or "10:00",
+            schedule_account_ids=json.dumps(aids, ensure_ascii=False),
+            schedule_product_id=int(body.schedule_product_id or 0),
+        )
+    finally:
+        db.close()
+    audit.audit(request, "settings.user", "更新个人设置（模型/Key/定时）", user=me)
+    return {"ok": True}
 
 
 def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
@@ -1169,6 +1244,23 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
         raise HTTPException(400, f"provider 必须是 {list(llm.PROVIDERS)} 之一")
 
     db = SessionLocal()
+    # 每用户默认 LLM（多租户：各人用各人的模型/Key）。优先级：请求显式传 > 用户默认设置 > provider 内置默认
+    us = db_api.get_user_setting(operator["id"]) if operator else None
+    api_key = req.api_key
+    model = req.model
+    base_url = req.base_url
+    if us:
+        if not api_key:
+            api_key = us.llm_api_key or ""
+        if not model:
+            model = us.llm_model or ""
+        if not base_url:
+            base_url = us.llm_base_url or ""
+    if not model:
+        model = llm.PROVIDERS[req.provider]["default_model"]
+    if not base_url:
+        base_url = llm.PROVIDERS[req.provider]["default_base_url"]
+
     product_name, product_intro, product_style = "", "", ""
     if req.product_id:
         prod = db.get(Product, req.product_id)
@@ -1177,14 +1269,20 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     account = None
     if req.account_id:
         account = db.get(Account, req.account_id)
+        if account and operator:
+            is_admin = operator["role"] == "admin"
+            visible = is_admin or account.owner_id is None or account.owner_id == operator["id"]
+            if not visible:
+                db.close()
+                raise HTTPException(403, "无权发布到该公众号（只能发你自己的或系统共享号）")
     db.close()
 
     brand = product_name or req.brand
     job = _new_job(tl, brand, req.author, req.extra_hint, operator=operator)
     job["provider"] = req.provider
-    job["api_key"] = req.api_key
-    job["llm_model"] = req.model or llm.PROVIDERS[req.provider]["default_model"]
-    job["base_url"] = req.base_url or llm.PROVIDERS[req.provider]["default_base_url"]
+    job["api_key"] = api_key
+    job["llm_model"] = model
+    job["base_url"] = base_url
     job["use_api"] = bool(req.use_api)
     job["product_name"] = product_name
     job["product_intro"] = product_intro
@@ -1322,7 +1420,8 @@ async def api_schedule_set(cfg: ScheduleIn, request: Request):
 async def api_daily_run(request: Request):
     """手动触发一次「每日批次」（补跑用）：POST /api/daily/run
     · 今日计划已全部完成 → 拒绝（避免重复发文）
-    · 否则立即在后台跑当天批次（服务常驻进程里执行，不受外部会话影响）"""
+    · 否则立即在后台跑当天批次（服务常驻进程里执行，不受外部会话影响）；
+      按【当前操作人】自己的 LLM 配置与公众号列表发布，不干扰其他用户。"""
     me = auth.need_role(request, "editor")
     today = datetime.now().strftime("%Y-%m-%d")
     plan = _plan_load()
@@ -1331,10 +1430,10 @@ async def api_daily_run(request: Request):
         pending = [i for i in items if i.get("status") != "done"]
         if items and not pending:
             raise HTTPException(400, f"今日批次已完成（{len(items)} 篇），无需补跑")
-    SCHED_CFG["last_run_date"] = today
-    _save_sched()
-    threading.Thread(target=_run_daily_batch, args=("手动补跑",), daemon=True).start()
-    logger.info("手动触发每日批次（补跑）")
+    # 用操作人自己的配置跑（不传 account_ids → 由 _run_daily_batch 按其 UserSetting 解析）
+    threading.Thread(target=_run_daily_batch,
+                    kwargs=dict(user_id=me["id"], reason="手动补跑"), daemon=True).start()
+    logger.info("手动触发每日批次（补跑）用户#%s", me["id"])
     audit.audit(request, "job.daily", f"手动补跑今日批次（{today}）", user=me)
     return {"ok": True, "msg": f"已触发每日批次（{today}），后台执行，约 25 分钟"}
 
@@ -1395,14 +1494,17 @@ def _plan_enqueue_items(new_items: list, gap_min: int = 35) -> int:
     return added
 
 
-def _today_done_topics() -> set:
-    """今天（北京时间）已成功发布的主题集合，避免续批/重启后重复发布。"""
+def _today_done_topics(aid: int = 0) -> set:
+    """今天（北京时间）某公众号已成功发布的主题集合（aid=0 表示全部号），避免多号/续批重复发布。"""
     bj_now = datetime.utcnow() + timedelta(hours=8)
     bj_day_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0)
     utc_start = bj_day_start - timedelta(hours=8)
     db = SessionLocal()
     try:
-        rows = db.query(Article).filter(Article.created_at >= utc_start, Article.status == "published").all()
+        q = db.query(Article).filter(Article.created_at >= utc_start, Article.status == "published")
+        if aid:
+            q = q.filter(Article.account_id == aid)
+        rows = q.all()
         return {r.topic for r in rows if r.topic}
     finally:
         db.close()
@@ -1422,14 +1524,17 @@ def _today_published_count() -> int:
         return -1
 
 
-def _today_published_local_count() -> int:
-    """本机数据库记录的"今天（北京时间）已发布"篇数（用于与微信端对比，发现外部发布）。"""
+def _today_published_local_count(aid: int = 0) -> int:
+    """本机数据库记录的"今天（北京时间）某公众号已发布"篇数（用于与微信端对比，发现外部发布）。"""
     bj_now = datetime.utcnow() + timedelta(hours=8)
     utc_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     db = SessionLocal()
     try:
-        return db.query(Article).filter(Article.created_at >= utc_start,
-                                        Article.status == "published").count()
+        q = db.query(Article).filter(Article.created_at >= utc_start,
+                                    Article.status == "published")
+        if aid:
+            q = q.filter(Article.account_id == aid)
+        return q.count()
     finally:
         db.close()
 
@@ -1449,13 +1554,17 @@ def _save_gen_queue(q: list):
     set_setting(QUEUE_KEY, json.dumps(q, ensure_ascii=False))
 
 
-def _plan_init_today(topics: list) -> dict:
-    done = _today_done_topics()
+def _plan_init_today(topics: list, account_ids=None) -> dict:
+    # 多租户：某主题只有"所有目标号今天都发过"才视为已发（避免 A 号发过就把 B 号也跳过）
+    accs = [int(x) for x in (account_ids or [])]
+    if accs:
+        done_sets = [_today_done_topics(a) for a in accs]
+        done = set.intersection(*done_sets) if done_sets else set()
+    else:
+        done = _today_done_topics(0)
     # ── 跨设备防重 ───────────────────────────────────────────────
-    # 若微信端今日已发篇数 > 本机数据库记录的今日已发篇数，说明另有设备（或手动入口）发过。
-    # 两台设备主题库与顺序一致，故把"多出来的篇数"按顺序视为已发，避免重复发文。
     wx_n = _today_published_count()
-    local_n = _today_published_local_count()
+    local_n = _today_published_local_count(accs[0] if accs else 0)
     if wx_n > local_n:
         extra = min(wx_n - local_n, len(topics))
         if extra > 0:
@@ -1464,7 +1573,6 @@ def _plan_init_today(topics: list) -> dict:
             logger.warning("跨设备防重：微信端今日已发 %d 篇、本机记录 %d 篇 → 跳过前 %d 个主题：%s",
                            wx_n, local_n, extra, "、".join(skipped))
     items = []
-    # ── 已生成文章队列优先：先发库存，发完再实时生成 ──────────────
     queue = _load_gen_queue()
     if queue:
         taken, rest = 0, []
@@ -1473,62 +1581,135 @@ def _plan_init_today(topics: list) -> dict:
             if taken < len(topics) and tp and tp not in done:
                 items.append({"topic": tp, "title": it.get("title") or "",
                               "body_path": it.get("body_path") or "",
-                              "draft_mid": "", "status": "pending"})
+                              "draft_mid": "", "drafts": {}, "status": "pending"})
                 taken += 1
             else:
                 rest.append(it)
         _save_gen_queue(rest)
         if taken:
             logger.info("从已生成队列取 %d 篇今日发布（队列剩余 %d 篇）", taken, len(rest))
-    # 队列不够 20 篇时，剩余主题仍走即时生成（发完库存自动切回生成）
     covered = {it["topic"] for it in items}
-    items += [{"topic": nm, "title": "", "draft_mid": "", "status": "pending"}
+    items += [{"topic": nm, "title": "", "draft_mid": "", "drafts": {}, "status": "pending"}
               for nm in topics if nm not in done and nm not in covered]
-    return {"date": datetime.now().strftime("%Y-%m-%d"), "items": items, "next_ts": 0, "batch_done": 0}
+    return {"date": datetime.now().strftime("%Y-%m-%d"), "items": items, "next_ts": 0, "batch_done": 0,
+            "fail_streak": 0, "limit_alerted": False}
 
 
-def _run_daily_batch(reason: str = "每日定时"):
-    """执行一个批次：发布计划队列前 BATCH_SIZE 篇（有草稿的直接补发，否则生成→存草稿→提交）。
-    结束后：还有剩余 → 30 分钟后自动续批；全部完成 → 清计划。结果推送到微信群。"""
+def _item_done_for_accounts(it: dict, target_ids: list) -> bool:
+    """某主题是否已发到【全部】目标公众号（多租户去重判据）。
+
+    单号去重由微信端 _today_done_topics 负责；这里的 done_accounts 记录本计划里
+    该主题已成功发到哪些号，只有覆盖全部目标号才视为 plan 级 done，避免
+    「A 号发过就把 B 号也跳过」的错误。"""
+    if not target_ids:
+        return False
+    das = set(int(x) for x in (it.get("done_accounts") or []))
+    return set(int(x) for x in target_ids) <= das
+
+
+def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", schedule_product_id=0,
+                     mark_daily_run=False):
+    """执行一个批次：把今天的发布计划发到「用户勾选的多个公众号」（多租户）。
+    - 每个用户用自己的 LLM 配置（各人消耗各人的 Key）；每个公众号独立去重/草稿/发表；
+    - 同一批主题会发到用户勾选的每一个号 ⇒ 实现"多个公众号同时定时发布"；
+    - 结束后还有剩余 → 30/60 分钟自动续批；全部完成 → 清计划；结果推送到微信群。
+    - mark_daily_run=True 时（调度器每日起点拉起），会在拿到锁后写入该用户
+      schedule_last_run_date，确保同一天不会被重复拉起。"""
     if not _batch_lock.acquire(blocking=False):
         logger.info("已有批次在执行，跳过本次触发")
         return
     try:
+        # 多租户每日触发：标记该用户今日已触发，避免调度器重复拉起（仅在真正拿到锁后写）
+        if mark_daily_run and user_id:
+            try:
+                _db = SessionLocal()
+                try:
+                    _us = _db.query(UserSetting).filter(UserSetting.user_id == user_id).first()
+                    if _us:
+                        _us.schedule_last_run_date = datetime.now().strftime("%Y-%m-%d")
+                        _db.commit()
+                finally:
+                    _db.close()
+            except Exception as e:
+                logger.warning("更新 schedule_last_run_date 失败: %s", e)
         _ensure_card_render_ok("每日批次开始")   # 渲染管线自检：不可用立即告警，避免静默降级
         db = SessionLocal()
         try:
             topics = [t.name for t in db.query(Topic).order_by(Topic.id).all()]
-            account = db.query(Account).order_by(Account.id).first()
-            product = db.query(Product).order_by(Product.id).first()
+            all_accounts = db.query(Account).order_by(Account.id).all()
         finally:
             db.close()
         if not topics:
             logger.warning("定时发布跳过：主题库为空")
             return
 
+        # ── 解析目标公众号列表（多租户：优先用传入 account_ids，否则从用户设置取）──
+        target_accounts = []
+        if account_ids:
+            target_accounts = [a for a in all_accounts if a.id in set(int(x) for x in account_ids)]
+        else:
+            us = db_api.get_user_setting(user_id) if user_id else None
+            if not us and all_accounts:
+                us = db_api.get_user_setting(all_accounts[0].owner_id) if all_accounts[0].owner_id else None
+            if us:
+                aids = []
+                try:
+                    aids = [int(x) for x in json.loads(us.schedule_account_ids or "[]")] if us.schedule_account_ids else []
+                except Exception:
+                    aids = []
+                if not aids and us.default_account_id:
+                    aids = [us.default_account_id]
+                target_accounts = [a for a in all_accounts if a.id in set(aids)]
+            if not target_accounts and all_accounts:
+                target_accounts = [all_accounts[0]]   # legacy 兜底：第一个号
+        if not target_accounts:
+            logger.warning("定时发布跳过：无任何可发布公众号")
+            return
+        target_ids = [a.id for a in target_accounts]
+
+        # ── 解析该用户的 LLM 配置（各人消耗各人的 Key）──
+        us = db_api.get_user_setting(user_id) if user_id else None
+        if not us and target_accounts:
+            us = db_api.get_user_setting(target_accounts[0].owner_id) if target_accounts[0].owner_id else None
+        prov = (us.llm_provider if us and us.llm_provider else "deepseek")
+        api_key = (us.llm_api_key or "") if us else ""
+        model = (us.llm_model or "") if us else ""
+        base_url = (us.llm_base_url or "") if us else ""
+        if not model:
+            model = llm.PROVIDERS[prov]["default_model"]
+        if not base_url:
+            base_url = llm.PROVIDERS[prov]["default_base_url"]
+
+        # ── 产品（定时使用的产品）──
+        product = None
+        if schedule_product_id:
+            db = SessionLocal()
+            try:
+                product = db.query(Product).filter(Product.id == schedule_product_id).first()
+            finally:
+                db.close()
+        if not product:
+            db = SessionLocal()
+            try:
+                product = db.query(Product).order_by(Product.id).first()
+            finally:
+                db.close()
+
         plan = _plan_load()
-        if plan.get("date") != datetime.now().strftime("%Y-%m-%d"):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if plan.get("date") != today:
             # 新的一天：重建计划，但保留昨天尚未补发完的手动发布篇（有正文/草稿的），避免丢失
             leftover = [it for it in plan.get("items", [])
-                        if it.get("status") != "done" and (it.get("body_path") or it.get("draft_mid"))]
-            plan = _plan_init_today(topics)
+                        if it.get("status") != "done" and (it.get("body_path") or it.get("draft_mid") or it.get("drafts"))]
+            plan = _plan_init_today(topics, [a.id for a in target_accounts])
             if leftover:
                 plan["items"] = leftover + plan["items"]
                 logger.info("跨天保留未补发的 %d 篇（有正文/草稿）", len(leftover))
-        plan["items"] = [it for it in plan.get("items", []) if it.get("topic") in topics or it.get("draft_mid") or it.get("body_path")]
-        pending = [it for it in plan["items"] if it.get("status") != "done"]
+        plan["items"] = [it for it in plan.get("items", [])
+                         if it.get("topic") in topics or it.get("draft_mid") or it.get("drafts") or it.get("body_path")]
+        pending = [it for it in plan["items"] if not _item_done_for_accounts(it, target_ids)]
         if not pending:
             logger.info("今日发布计划已全部完成")
-            plan["next_ts"] = 0
-            _plan_save(plan)
-            return
-        # ── 跨设备双保险 ─────────────────────────────────────────
-        # 若微信端今日已发篇数已达到/超过今日计划总数，说明另一台设备已完成今天的发布，
-        # 本批直接跳过（避免两台同时开定时造成重复发文）。
-        wx_n = _today_published_count()
-        if wx_n > 0 and wx_n >= len(plan["items"]):
-            logger.warning("跨设备防重：微信端今日已发 %d 篇 ≥ 今日计划 %d 篇，本批跳过（另一台设备可能已发完）",
-                           wx_n, len(plan["items"]))
             plan["next_ts"] = 0
             _plan_save(plan)
             return
@@ -1536,138 +1717,170 @@ def _run_daily_batch(reason: str = "每日定时"):
         batch = pending[:BATCH_SIZE]
         batch_no = int(plan.get("batch_done", 0)) + 1
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
+        acc_names = "、".join(a.name for a in target_accounts) or "默认"
+        # 操作人（审计用）
+        op_user = None
+        if user_id:
+            db = SessionLocal()
+            try:
+                u = db.query(User).filter(User.id == user_id).first()
+                if u:
+                    op_user = {"username": u.username, "role": u.role}
+            finally:
+                db.close()
         job = {
             "id": job_id,
             "topics": [{"name": it["topic"], "count": 1} for it in batch],
             "topic": batch[0]["topic"] if batch else "",
             "total": len(batch), "count": len(batch),
             "brand": product.name if product else "百秘一梳",
-            "author": (account.author if account else "百秘一梳"),
+            "author": target_accounts[0].author if target_accounts else "百秘一梳",
             "extra_hint": "",
             "created_at": datetime.now().isoformat(),
             "phase": "generating",
             "articles": [],
-            "log": [f"[{datetime.now().isoformat()}] ⏰ {reason}：第 {batch_no} 批开始（本批 {len(batch)} 篇，计划剩余 {len(pending)} 篇）"
+            "log": [f"[{datetime.now().isoformat()}] ⏰ {reason}：第 {batch_no} 批开始（本批 {len(batch)} 篇，计划剩余 {len(pending)} 篇，目标号：{acc_names}）"
                     + ("" if notify.configured() else "｜⚠️ 未配置 ROBOT_WEBHOOK_URL，完成通知将跳过")],
-            "provider": "deepseek", "api_key": "",
-            "llm_model": llm.PROVIDERS["deepseek"]["default_model"],
-            "base_url": llm.PROVIDERS["deepseek"]["default_base_url"],
+            "provider": prov, "api_key": api_key, "llm_model": model, "base_url": base_url,
             "use_api": True,
             "product_name": product.name if product else "",
             "product_intro": product.intro if product else "",
             "product_style": (product.style or "") if product else "",
-            "account_appid": account.appid if account else "",
-            "account_secret": account.secret_enc if account else "",
-            "account_name": account.name if account else "默认",
+            "account_appid": target_accounts[0].appid if target_accounts else "",
+            "account_secret": target_accounts[0].secret_enc if target_accounts else "",
+            "account_name": acc_names,
             "source_label": "每日定时", "notify_on_done": True,
+            "operator": op_user or {"username": "系统定时", "role": "system"},
             "cancel": False,
         }
         with jobs_lock:
             jobs[job_id] = job
-        if account:
-            try:
-                wechat_api.set_account(account.appid, account.secret_enc)
-            except Exception as e:
-                job["log"].append(f"⚠️ 切换公众号失败：{e}")
 
-        ok = 0
+        # 先确保本批每篇都有正文（生成一次，各号复用，避免重复消耗 LLM）
+        for it in batch:
+            if it.get("body_path"):
+                f = ARTICLES_DIR / Path(it["body_path"]).name
+                if f.exists():
+                    it["_body"] = f.read_text(encoding="utf-8")
+                    it["_title"] = it.get("title") or ""
+            if not it.get("_body"):
+                try:
+                    items = _gen_with_dedup(it["topic"], 1, job, job["log"])
+                except Exception as e:
+                    job["log"].append(f"⚠️ 主题「{it['topic']}」生成失败（本批跳过，下批重试）：{str(e)[:100]}")
+                    it["_body"] = None
+                    continue
+                if not items:
+                    it["_body"] = None
+                    continue
+                it["_title"] = items[0]["title"]; it["_body"] = items[0]["body_md"]
+                md_p = ARTICLES_DIR / f"{job_id}_{it['topic']}_{uuid.uuid4().hex[:4]}.md"
+                md_p.write_text(it["_body"], encoding="utf-8")
+                it["title"] = it["_title"]; it["body_path"] = md_p.name
+                try:
+                    dbg = SessionLocal()
+                    dbg.add(Article(job_id=job_id, seq=-1, topic=it["topic"], title=it["_title"],
+                                   body_md=it["_body"], status="generated"))
+                    dbg.commit(); dbg.close()
+                except Exception:
+                    pass
+            # 排版（各号复用同一份卡片）
+            body_html, _tmid, _tmname = wxcard.render_md_with_theme_safe(it["_body"])
+            it["_html"] = body_html; it["theme"] = _tmname
+
+        ok_total = 0
         hit_limit = False
         ip_blocked = False   # 40164：本机公网 IP 不在公众号白名单（需人工去后台加白）
-        for idx, it in enumerate(batch):
-            topic = it["topic"]
-            seq = idx
-            with jobs_lock:
-                job["phase"] = f"publishing_p{seq+1}"
-                job["log"].append(f"[{datetime.now().isoformat()}] 开始第 {seq+1}/{len(batch)} 篇：{topic}"
-                                  + ("（草稿已存在，直接补发）" if it.get("draft_mid") else ""))
-            job["articles"].append({"seq": seq, "topic": topic,
-                                    "title": it.get("title") or f"{topic}（自动生成）", "status": "publishing"})
+        acc_done = {}
+        for acc in target_accounts:
             try:
-                mid = it.get("draft_mid") or ""
-                title = it.get("title") or ""
-                if not mid:
-                    body = ""
-                    # 优先复用本地已生成的正文（手动发布未成功篇的补发，不重复消耗 LLM 生成）
-                    bp = it.get("body_path") or ""
-                    if bp:
-                        f = ARTICLES_DIR / Path(bp).name
-                        if f.exists():
-                            body = f.read_text(encoding="utf-8")
-                    if not body:
-                        items = _gen_with_dedup(topic, 1, job, job["log"])
-                        if not items:
-                            raise RuntimeError("LLM 未返回文章")
-                        title = items[0]["title"]; body = items[0]["body_md"]
-                        md_p = ARTICLES_DIR / f"{job_id}_{seq}.md"
-                        md_p.write_text(body, encoding="utf-8")
-                        # 立即把标题/正文路径写入计划：后续批次失败重试时直接复用，不再重复消耗 LLM 生成
-                        it["title"] = title
-                        it["body_path"] = md_p.name
-                    title = title or f"{topic}"
-                    # md2card 公众号模式卡片排版；自动发布随机选 4 个主题之一（不含日本杂志），失败降级旧版
-                    body_html, _tmid, _tmname = wxcard.render_md_with_theme_safe(body)
-                    job["log"].append(f"  第 {seq+1} 篇：排版主题「{_tmname}」")
-                    it["theme"] = _tmname        # 记进计划，供「每天一条」汇总显示排版主题
-                    # 存草稿（封面裁剪失败 53402 属随机封面偶发问题 → 换一张封面立即重试，避免白等一批）
-                    mid, _cover_note = _add_draft_with_cover_retry(
-                        title=title, body_html=body_html, author=job["author"],
-                        digest=(body or "")[:100])
-                    if _cover_note:
-                        job["log"].append(f"  {_cover_note}")
-                    it["title"] = title; it["draft_mid"] = mid
-                    job["articles"][seq]["title"] = title
-                    try:
-                        db2 = SessionLocal()
-                        db2.add(Article(job_id=job_id, seq=seq, topic=topic, title=title, body_md=body, status="generated"))
-                        db2.commit(); db2.close()
-                    except Exception:
-                        pass
-                job["log"].append(f"  第 {seq+1} 篇：提交发布（草稿 {str(mid)[:12]}…）")
-                pub = wechat_api.publish_draft(mid, fast_fail=True)   # 批次内快速失败，失败篇留待下一批
-                pid = str(pub.get("publish_id") or "")
-                url = ""   # 链接统一在批次结束后用一次 batchget 回填（逐篇查询会耗尽 freepublish/get 日配额）
-                it["status"] = "done"
-                job["articles"][seq]["status"] = "published"
-                job["articles"][seq]["publish_id"] = pid
-                if url:
-                    job["articles"][seq]["url"] = url
-                    it["url"] = url
-                # 落库发布结果：既让网页/统计准确，也让 _today_done_topics（本机今日已发）
-                # 与微信端统计保持一致 —— 跨设备防重依赖这个数据
-                try:
-                    db3 = SessionLocal()
-                    row = db3.query(Article).filter(Article.job_id == job_id, Article.seq == seq).first()
-                    if row:
-                        row.status = "published"
-                        row.publish_id = pid
-                    else:
-                        db3.add(Article(job_id=job_id, seq=seq, topic=topic,
-                                        title=it.get("title") or "", body_md="",
-                                        status="published", publish_id=pid))
-                    db3.commit()
-                    db3.close()
-                except Exception as _e:
-                    logger.warning("批次发布结果落库失败(不影响发布)：%s", str(_e)[:100])
-                ok += 1
-                job["log"].append(f"✅ 第 {seq+1} 篇发布成功 publish_id={pid}" + (f"\n   链接: {url}" if url else ""))
+                wechat_api.set_account(acc.appid, acc.secret_enc)
             except Exception as e:
-                it["status"] = "failed"       # 保留 draft_mid，下组直接补发
-                job["articles"][seq]["status"] = "failed"
-                job["articles"][seq]["error"] = str(e)[:200]
-                job["log"].append(f"❌ 第 {seq+1} 篇失败（留待下一批补发）：{str(e)[:120]}")
-                if "40164" in str(e):
-                    ip_blocked = True
-                if "53501" in str(e):
-                    hit_limit = True
-                    job["log"].append("  ⚠️ 命中微信频率限制 → 本批提前结束，剩余篇留到下一批（避免继续撞限加重冷却）")
-                    break
-            if idx < len(batch) - 1:
-                time.sleep(POST_INTERVAL_SEC)   # 组内篇间隔，避免密集提交触发惩罚性限流
+                job["log"].append(f"⚠️ 切换公众号「{acc.name}」失败：{e}")
+                continue
+            acc_done[acc.id] = _today_done_topics(acc.id)
+            # 跨设备双保险：该号微信端今日已发 ≥ 本批篇数 → 跳过该号（另一设备可能已发完）
+            wx_n = _today_published_count()
+            if wx_n > 0 and wx_n >= len(batch):
+                job["log"].append(f"  ℹ️ 公众号「{acc.name}」：微信端今日已发 {wx_n} 篇 ≥ 本批 {len(batch)} 篇，跳过该号（另一设备可能已发）")
+                continue
+            job["log"].append(f"  📡 开始向公众号「{acc.name}」发布本批 {len(batch)} 篇")
+            acc_ok = 0
+            k = 0
+            for it in batch:
+                topic = it["topic"]
+                if topic in acc_done[acc.id]:
+                    continue   # 该号今天已发过此主题
+                if not it.get("_body"):
+                    continue
+                seq = len(job["articles"])
+                with jobs_lock:
+                    job["phase"] = f"publishing_p{seq+1}"
+                    job["log"].append(f"[{datetime.now().isoformat()}] 「{acc.name}」第 {k+1}/{len(batch)} 篇：{topic}")
+                job["articles"].append({"seq": seq, "account": acc.name, "topic": topic,
+                                        "title": it.get("_title") or topic, "status": "publishing"})
+                try:
+                    mid = (it.get("drafts") or {}).get(str(acc.id)) or ""
+                    title = it.get("_title") or topic
+                    if not mid:
+                        # 每个号独立存草稿（草稿是按号隔离的，不能跨号复用）
+                        mid, _cover_note = _add_draft_with_cover_retry(
+                            title=title, body_html=it.get("_html") or "", author=job["author"],
+                            digest=(it["_body"] or "")[:100])
+                        if _cover_note:
+                            job["log"].append(f"  {_cover_note}")
+                        it.setdefault("drafts", {})[str(acc.id)] = mid
+                    job["log"].append(f"  提交发布到「{acc.name}」（草稿 {str(mid)[:12]}…）")
+                    pub = wechat_api.publish_draft(mid, fast_fail=True)   # 批次内快速失败，失败篇留待下一批
+                    pid = str(pub.get("publish_id") or "")
+                    # 记录该主题已成功发到本号；只有覆盖全部目标号才在收尾时判为 plan 级 done
+                    it.setdefault("done_accounts", [])
+                    if acc.id not in it["done_accounts"]:
+                        it["done_accounts"].append(acc.id)
+                    job["articles"][seq]["status"] = "published"
+                    job["articles"][seq]["publish_id"] = pid
+                    # 落库（带 account_id，多号去重用）
+                    try:
+                        db3 = SessionLocal()
+                        row = db3.query(Article).filter(Article.job_id == job_id, Article.seq == seq).first()
+                        if row:
+                            row.status = "published"; row.publish_id = pid; row.account_id = acc.id
+                        else:
+                            db3.add(Article(job_id=job_id, seq=seq, topic=topic, title=title,
+                                           body_md=it["_body"], status="published", publish_id=pid,
+                                           account_id=acc.id))
+                        db3.commit(); db3.close()
+                    except Exception as _e:
+                        logger.warning("批次发布结果落库失败: %s", str(_e)[:100])
+                    ok_total += 1; acc_ok += 1
+                    job["log"].append(f"✅ 「{acc.name}」第 {k+1} 篇发布成功 publish_id={pid}")
+                except Exception as e:
+                    job["articles"][seq]["status"] = "failed"
+                    job["articles"][seq]["error"] = str(e)[:200]
+                    job["log"].append(f"❌ 「{acc.name}」第 {k+1} 篇失败（留待下一批补发）：{str(e)[:120]}")
+                    if "40164" in str(e):
+                        ip_blocked = True
+                    if "53501" in str(e):
+                        hit_limit = True
+                        job["log"].append("  ⚠️ 命中微信频率限制 → 本号本批提前结束，剩余篇留到下一批")
+                        break
+                k += 1
+                if k < len(batch):
+                    time.sleep(POST_INTERVAL_SEC)   # 组内篇间隔，避免密集提交触发惩罚性限流
+            job["log"].append(f"  ✅ 公众号「{acc.name}」本批成功 {acc_ok} 篇")
 
+        # 收尾：重新计算每篇完成状态（多租户：发到全部目标号才算 done）
+        for it in plan["items"]:
+            if _item_done_for_accounts(it, target_ids):
+                it["status"] = "done"
+            elif it.get("_body") or it.get("drafts"):
+                it["status"] = "partial"
+            else:
+                it["status"] = "pending"
         remaining = [it for it in plan["items"] if it.get("status") != "done"]
         plan["batch_done"] = batch_no
-        # 连续全失败时逐次拉长批间隔（30→60→120→180 分钟封顶），避免无效高频重试
-        if ok > 0:
+        # 连续全失败时逐次拉长批间隔（30→60 分钟，封顶 60），避免无效高频重试
+        if ok_total > 0:
             plan["fail_streak"] = 0
         else:
             plan["fail_streak"] = int(plan.get("fail_streak", 0)) + 1
@@ -1684,7 +1897,7 @@ def _run_daily_batch(reason: str = "每日定时"):
         nxt_txt = datetime.fromtimestamp(plan["next_ts"]).strftime("%H:%M") if remaining else ""
         with jobs_lock:
             job["phase"] = "done"
-            job["log"].append(f"本批完成：成功 {ok}/{len(batch)}；今日剩余 {len(remaining)} 篇"
+            job["log"].append(f"本批完成：成功 {ok_total}/{len(batch)}；今日剩余 {len(remaining)} 篇"
                               + (f"，下一批 {nxt_txt} 自动继续" if remaining else "，全部完成 🎉"))
         # 通知前先回填文章链接（一次 batchget 取最近 50 篇；逐篇 freepublish/get 会耗尽日配额）
         _backfill_urls(job_id)
@@ -1710,7 +1923,7 @@ def _run_daily_batch(reason: str = "每日定时"):
                         plan["limit_alerted"] = True
                         _plan_save(plan)
                         notify.send("## ⏳ 触发微信频率限制，本批提前结束",
-                                    f"已发 {ok} 篇，剩余 {len(remaining)} 篇将在 {nxt_txt} 自动重试（无需处理）。",
+                                    f"已发 {ok_total} 篇，剩余 {len(remaining)} 篇将在 {nxt_txt} 自动重试（无需处理）。",
                                     use_markdown=True)
                     elif datetime.now().hour >= 23:
                         r = _build_today_summary_items()
@@ -1720,12 +1933,12 @@ def _run_daily_batch(reason: str = "每日定时"):
                                 r, f"⏳ 今日还剩 {len(remaining)} 篇，将于明天继续")
         except Exception as e:
             logger.warning("批次通知失败：%s", e)
-        logger.info("批次完成 job=%s 成功=%d/%d 剩余=%d", job_id, ok, len(batch), len(remaining))
+        logger.info("批次完成 job=%s 成功=%d/%d 剩余=%d", job_id, ok_total, len(batch), len(remaining))
         audit.audit(None, "publish.done",
-                    f"每日批次 {job_id}（{reason}）完成：成功 {ok}/{len(batch)} 篇，今日剩余 {len(remaining)} 篇",
+                    f"每日批次 {job_id}（{reason}）完成：成功 {ok_total}/{len(batch)} 篇，今日剩余 {len(remaining)} 篇",
                     user={"username": (job.get("operator") or {}).get("username") or ("系统" if reason != "手动补跑" else "手动补跑"),
                           "role": (job.get("operator") or {}).get("role", "")},
-                    level="warn" if ok < len(batch) else "info")
+                    level="warn" if ok_total < len(batch) else "info")
     finally:
         _batch_lock.release()
 
@@ -1851,19 +2064,92 @@ def _ip_watchdog():
         logger.warning("IP 变更通知失败：%s", e)
 
 
+def _migrate_account_owners():
+    """旧库兼容：把未归属(owner_id NULL)的公众号过户给管理员，使多租户改造后单用户部署不中断。"""
+    try:
+        db = SessionLocal()
+        try:
+            n = db.query(Account).filter(Account.owner_id.is_(None)).count()
+            if n == 0:
+                return
+            admin = db.query(User).filter(User.role == "admin").order_by(User.id).first()
+            if not admin:
+                return
+            db.query(Account).filter(Account.owner_id.is_(None)).update({Account.owner_id: admin.id})
+            db.commit()
+            logger.info("已将 %d 个未归属公众号过户给管理员(uid=%d)", n, admin.id)
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("账号过户迁移失败（可忽略）: %s", e)
+
+
+def _parse_aids(s) -> list:
+    """把 UserSetting.schedule_account_ids（JSON 文本）解析成 int 列表（容错）。"""
+    try:
+        return [int(x) for x in json.loads(s or "[]")] if s else []
+    except Exception:
+        return []
+
+
+def _parse_hhmm(t):
+    """'HH:MM' → (hh, mm)，容错默认 10:00。"""
+    try:
+        hh, mm = [int(x) for x in str(t or "10:00").split(":")]
+        return hh, mm
+    except Exception:
+        return 10, 0
+
+
+def _enabled_user_schedules():
+    """返回所有启用每日定时的 UserSetting（无则空列表）。"""
+    try:
+        db = SessionLocal()
+        try:
+            return db.query(UserSetting).filter(UserSetting.schedule_enabled == 1).all()
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取用户定时设置失败：%s", e)
+        return []
+
+
 def _scheduler_loop():
-    """后台调度线程（每 20s）：
-    1) 每日定时：到达设定时刻（起 3 分钟窗口内）→ 启动当天第 1 批；
-       窗口错过也补跑——只要当天还没触发过、且当前时间仍在 CATCHUP_UNTIL_HOUR 之前，
-       就补跑一次（服务晚启动/重启后不会整天漏发，2026-09-29 新增）；
-    2) 续批：发布计划里有 next_ts 且到点 → 自动续下一批（用分批避开微信频率风控）。"""
+    """后台调度线程（每 20s，多租户）：
+    1) 每日定时：遍历【每位启用定时】的用户，到达其设定时刻（含 3 分钟窗口/错过后补跑）
+       → 用该用户自己的 LLM 配置 + 自选公众号列表拉起当天第 1 批；
+       没有任何用户启用定时时，退回到旧版单全局 SCHED_CFG（向后兼容）。
+    2) 续批：发布计划 next_ts 到点 → 为【每位仍有剩余主题】的启用用户继续发
+       （无启用用户则用全局兜底），用分批避开微信频率风控；全程串行（单锁），
+       多个用户/多个号不会并发撞微信限流。"""
     while True:
         try:
             _ip_watchdog()
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
-            # 1) 每日定时起点（含错过后补跑）
-            if SCHED_CFG.get("enabled"):
+            us_rows = _enabled_user_schedules()
+            # 1) 每日定时起点（含错过后补跑）—— 仅在当前无批次运行时派发，避免线程堆积
+            if us_rows and not _batch_lock.locked():
+                for us in us_rows:
+                    if us.schedule_last_run_date == today:
+                        continue   # 该用户今天已触发过
+                    hh, mm = _parse_hhmm(us.schedule_time)
+                    target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if target_dt <= now:
+                        in_window = now <= target_dt + timedelta(minutes=3)
+                        before_cutoff = now.hour < CATCHUP_UNTIL_HOUR
+                        if in_window or before_cutoff:
+                            aids = _parse_aids(us.schedule_account_ids)
+                            if not aids and us.default_account_id:
+                                aids = [us.default_account_id]
+                            reason = "每日定时" if in_window else f"补跑（服务 {now.strftime('%H:%M')} 才运行）"
+                            logger.info("触发每日批次（用户#%s）：%s，目标号=%s", us.user_id, reason, aids or "默认")
+                            threading.Thread(target=_run_daily_batch,
+                                            kwargs=dict(user_id=us.user_id, account_ids=aids,
+                                                        reason=reason, schedule_product_id=us.schedule_product_id,
+                                                        mark_daily_run=True), daemon=True).start()
+            elif not us_rows and SCHED_CFG.get("enabled"):
+                # 向后兼容：旧版单全局定时（无人启用每用户定时时生效）
                 try:
                     hh, mm = [int(x) for x in str(SCHED_CFG["time"]).split(":")]
                     target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
@@ -1874,7 +2160,7 @@ def _scheduler_loop():
                             SCHED_CFG["last_run_date"] = today
                             _save_sched()
                             reason = "每日定时" if in_window else f"补跑（服务 {now.strftime('%H:%M')} 才运行）"
-                            logger.info("触发每日批次：%s", reason)
+                            logger.info("触发每日批次（全局）：%s", reason)
                             threading.Thread(target=_run_daily_batch, args=(reason,), daemon=True).start()
                         else:
                             logger.warning("今日定时已错过且已过 %d 点，不再补跑（避免深夜发文）", CATCHUP_UNTIL_HOUR)
@@ -1882,13 +2168,30 @@ def _scheduler_loop():
                             _save_sched()
                 except Exception as e:
                     logger.warning("定时检查异常: %s", e)
-            # 2) 续批
-            plan = _plan_load()
-            nxt = int(plan.get("next_ts") or 0)
-            if nxt and plan.get("date") == today and time.time() >= nxt:
-                plan["next_ts"] = 0      # 先清零防重复触发；批次结束会重新写
-                _plan_save(plan)
-                threading.Thread(target=_run_daily_batch, args=("续批",), daemon=True).start()
+            # 2) 续批（仅在当前无批次运行时派发）
+            if not _batch_lock.locked():
+                plan = _plan_load()
+                nxt = int(plan.get("next_ts") or 0)
+                if nxt and plan.get("date") == today and time.time() >= nxt:
+                    plan["next_ts"] = 0      # 先清零防重复触发；批次结束会重新写
+                    _plan_save(plan)
+                    if us_rows:
+                        # 为每位【仍有剩余主题】的启用用户继续发（跳过已发完的，避免空跑）
+                        for us in us_rows:
+                            aids = _parse_aids(us.schedule_account_ids)
+                            if not aids and us.default_account_id:
+                                aids = [us.default_account_id]
+                            if not aids:
+                                continue
+                            has_remaining = any(not _item_done_for_accounts(it, aids)
+                                                for it in plan.get("items", []))
+                            if not has_remaining:
+                                continue
+                            threading.Thread(target=_run_daily_batch,
+                                            kwargs=dict(user_id=us.user_id, account_ids=aids,
+                                                        reason="续批"), daemon=True).start()
+                    else:
+                        threading.Thread(target=_run_daily_batch, args=("续批",), daemon=True).start()
         except Exception:
             logger.exception("scheduler loop error")
         time.sleep(20)
