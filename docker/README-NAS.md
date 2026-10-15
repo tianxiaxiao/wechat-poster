@@ -44,6 +44,9 @@ sudo $(which docker-compose) logs -f poster
 > `ERROR: Couldn't find env file: /volume1/docker/poster/.env`），而 compose 里 service 的 `env_file`
 > 也指向同一个文件 —— 一个文件到底，避免"两个 .env 谁生效"的歧义。
 
+> 🚑 **传错文件了？**（例如把本机整个 `app/` 覆盖到 NAS 的 `app/` 上）→ 见文末
+> **附录 A：误操作急救**。**先按 A.2 做只读诊断，别急着删任何东西**——多数情况下生产数据毫发无伤。
+
 ---
 
 ## 一、把文件传到 NAS（照这个清单准备）
@@ -500,8 +503,10 @@ sudo $(which docker-compose) up -d
 **重置管理员密码（忘记密码时）**：
 
 ```bash
-sudo docker compose stop poster
-sudo docker run --rm -v poster_data:/data python:3.13-slim python - <<'PY'
+# ⚠️ 本项目默认用的是【绑定挂载】（./data → /srv/poster/app/data），不是命名卷。
+#    所以这里直接挂宿主数据目录；若你当初改成了命名卷，把左值换回 poster_data 即可。
+sudo docker stop wechat-poster
+sudo docker run --rm -v /volume1/docker/poster/data:/data python:3.13-slim python - <<'PY'
 import sqlite3, hashlib, secrets
 db = "/data/poster.db"; salt = secrets.token_hex(16)
 dk = hashlib.pbkdf2_hmac("sha256", "你的新密码至少8位".encode(), salt.encode(), 200000)
@@ -510,5 +515,109 @@ c = sqlite3.connect(db)
 c.execute("update users set password_hash=?, must_change_pw=0 where role='admin'", (h,))
 c.commit(); print("已重置管理员密码")
 PY
-sudo docker compose start poster
+sudo docker start wechat-poster
 ```
+
+---
+
+## 附录 A：误操作急救 —— 把 `app/` 目录传错 / 覆盖了 NAS 怎么办
+
+> 本节由一次**真实误操作**总结：把本机整个 `app/` 目录覆盖到 NAS 的 `app/` 上（连同本机的 `app/data/`、`app/.env`）。
+> 实测结论是**生产数据零损失**。流程记下来，下次照跑即可。**先诊断，后动手。**
+
+### A.1 先看懂：哪些会受影响，哪些不会
+
+| 东西 | 真正来源 | 覆盖宿主 `app/` 会怎样 |
+|---|---|---|
+| 容器跑的**代码** | **镜像内** `/srv/poster/app`（不是宿主目录） | 无影响；但**不 rebuild 就不会生效** |
+| **数据库/文章/日志/二维码** | bind mount 的 `/volume1/docker/poster/data/` | **碰不到**（数据不在 `app/` 下） |
+| 容器**环境变量与密钥** | **项目根** `.env`（compose `env_file: ./.env`） | 无影响 |
+
+关键认知：**宿主 `app/` 目录只是"构建原料"（build context）**，容器根本不从它读代码。
+另外项目根 `.dockerignore` 已排除 `**/.env` 与 `app/data`，所以本机的 `app/.env`、`app/data`
+**即使被拷到 NAS 也进不了镜像**，rebuild 不会污染容器 —— 但要记得事后清理宿主上的残留。
+
+### A.2 三步只读诊断（先别删任何东西）
+
+```bash
+cd /volume1/docker/poster
+
+# ①【最关键】容器到底把宿主哪个目录挂到了 /srv/poster/app/data
+sudo docker inspect -f '{{range .Mounts}}{{.Source}} ==> {{.Destination}}{{"\n"}}{{end}}' wechat-poster
+
+# ② 两个 data 目录现状（生产 vs 残留）
+ls -la data/
+ls -la app/data/ 2>/dev/null
+
+# ③ 让容器自己报生产库家底（最终裁判）
+sudo docker exec wechat-poster python -c "import sqlite3;c=sqlite3.connect('/srv/poster/app/data/poster.db');print('用户数',c.execute('select count(*) from users').fetchone()[0]);print('文章数',c.execute('select count(*) from articles').fetchone()[0])"
+```
+
+### A.3 判读标准
+
+- ① 显示 `.../poster/data ==> /srv/poster/app/data` → ✅ **生产库安全**，虚惊一场。
+- ③ 用户数/文章数与你 NAS 的历史量级相符 → ✅ 数据库完好。
+- ② 若 `app/data/poster.db` 的体积/时间与本机开发库一致 → 是本机数据被拷进来了，
+  **未被挂载、无害**，可清理。
+
+> 参考指纹（本机开发库，仅供比对，不是生产数据）：
+> `3,698,688 字节 / md5 前16 位 2d3cf741bda7fece`。
+
+### A.4 确认无恙后的收尾
+
+```bash
+cd /volume1/docker/poster
+
+# 1) 备份真·生产库
+sudo cp data/poster.db data/poster.db.bak-$(date +%Y%m%d-%H%M)
+
+# 2) 清掉拷过来、不该留在宿主上的残留
+#    ⚠️ 前提：A.2① 已确认挂载源是 ./data；若挂载源恰是 app/data，千万不要删，走 A.5
+sudo rm -f  app/.env        # 含本机路径（D:/…），留着日后在 NAS 直接 python app.py 会踩坑
+sudo rm -rf app/data        # 本机库 + 一堆 .pid / 调试图片，纯残留
+
+# 3) 重建，让新代码真正生效（覆盖 app/ 后不 rebuild，容器里跑的仍是旧代码）
+sudo $(which docker-compose) up -d --build
+sudo $(which docker-compose) logs -f --tail=100
+```
+
+### A.5 最坏情况：挂载源就是 `app/data`，且已被覆盖
+
+**先停手，别再写任何东西**，按优先级抢救：
+
+1. **容器还没重启** → 旧 inode 可能仍被进程持有，可从句柄拷出：
+   ```bash
+   sudo ls -l /proc/$(sudo docker inspect -f '{{.State.Pid}}' wechat-poster)/fd | grep poster.db
+   # 找到 fd 号 N 后：
+   sudo cp /proc/<PID>/fd/<N> /volume1/docker/poster/data/poster.db.recovered
+   ```
+2. **群晖回收站**：File Station → 该共享文件夹 → `#recycle`。
+3. **Hyper Backup / Snapshot Replication** 的历史版本恢复。
+
+即使最坏：**文章本体都在微信后台**，丢的只是「账号 + 发布记录 + 定时设置」，重建即可，不必恐慌。
+
+### A.6 事故后必做的一次核对（确认没有重复发布）
+
+服务晚启动/重建后，调度器会因"当天还没触发过"而在 **20:00 前自动补跑一次**。
+用下面这段确认今天的发布量与定时状态，避免重复发文：
+
+```bash
+sudo docker exec wechat-poster python -c "
+import sqlite3
+c=sqlite3.connect('/srv/poster/app/data/poster.db')
+cols=[r[1] for r in c.execute('pragma table_info(articles)')]
+t='created_at' if 'created_at' in cols else cols[-1]
+print('按天发布量:')
+for r in c.execute(f'select substr({t},1,10) d, count(*) from articles group by d order by d desc limit 7'): print(' ', r[0], r[1], '篇')
+print('settings:')
+for k,v in c.execute('select key,value from settings'): print(' ', k, '=', (v or '')[:150])
+"
+```
+
+- `daily_schedule.last_run_date` **已是今天** → 不会重复发（正常）。
+- 若容器日志出现 `触发每日批次` 而今天明明已经发过 → 立刻 `sudo $(which docker-compose) stop`。
+
+### A.7 两条通用规矩
+
+1. **永远不要把本机的 `app/data/` 传到 NAS**——那是本机开发库，会误导后续排查。只传代码。
+2. **覆盖宿主 `app/` 后必须 rebuild**，否则新代码不生效（容器跑的是镜像里的旧代码）。
