@@ -2499,6 +2499,7 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                                 f"{(('用户：' + _op['username']) if _op else '')}\n\n{llm_err}\n\n"
                                 f"（修复后当天可手动补跑；未授权用户不会使用服务端默认 Key）",
                                 use_markdown=True)
+                _record_key_failure(_owner_uid, llm_err)   # 供每日汇总兜底提示（合并摘要里也看得到）
             except Exception as e:  # noqa: BLE001
                 logger.warning("跳过通知失败：%s", e)
             return
@@ -2901,32 +2902,83 @@ def _real_pending_count() -> int:
         return 0
 
 
+def _record_key_failure(user_id: int, err: str) -> None:
+    """记录「今天某用户因缺少 API Key 被硬拦」——供每日汇总在合并摘要里兜底提示。
+
+    否则完全跳过的日子只在批次级即时消息里出现（见 _run_daily_batch 的 llm_err 分支），
+    不会进每日汇总；用户可能在合并汇总里完全看不到"今天有人没发成"。按日期分桶、按用户去重。"""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        key = f"daily_key_failures_{today}"
+        try:
+            arr = json.loads(get_setting(key, "[]") or "[]")
+        except Exception:
+            arr = []
+        if not isinstance(arr, list):
+            arr = []
+        uname = ""
+        if user_id:
+            try:
+                _db = SessionLocal()
+                try:
+                    _u = _db.query(User).filter(User.id == user_id).first()
+                    if _u:
+                        uname = _u.username
+                finally:
+                    _db.close()
+            except Exception:
+                pass
+        label = uname or (f"#{user_id}" if user_id else "系统定时")
+        if any(r.get("user") == label for r in arr):   # 同一用户当天只记一次
+            return
+        arr.append({"user": label, "err": (err or "")[:200], "ts": datetime.now().isoformat()})
+        set_setting(key, json.dumps(arr, ensure_ascii=False))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("记录 Key 失败信息异常：%s", e)
+
+
+def _today_key_failures() -> list:
+    """今天因缺少 API Key 被硬拦的用户列表（供每日汇总兜底提示）。"""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        arr = json.loads(get_setting(f"daily_key_failures_{today}", "[]") or "[]")
+        return arr if isinstance(arr, list) else []
+    except Exception:
+        return []
+
+
 def _ensure_daily_summary_sent(force: bool = False) -> bool:
     """确保「每天一条」的企微汇总**今天至少发过一次**（与批次是否跑完解耦）。
 
-    触发策略：
-      · 未配置群机器人 / 今天 0 篇已发布 → 不发；
-      · 今天已发过（daily_summary_date==today）且非 force → 不发（一天最多一条）；
-      · 真实剩余==0（今天计划篇已全部 published，含手动补发已发完）→ 发「全部完成」；
-      · 还有真实剩余：
-          - force → 发（人工兜底，无视一切）；
-          - 当前无批次在跑（_batch_lock 空闲）→ 剩余的很可能是陈旧/已失败，发「今日还剩 N 篇」提醒；
-          - 当前有批次在跑 且 未到深夜(hour<23) 且非 force → 暂不发，等发完或深夜再发；
-          - 已到深夜(hour>=23) 且非 force → 发「今日还剩 N 篇」（当天最后兜底）。
-    ⚠️ 关键修复：剩余判断用 _real_pending_count()（DB 真实发布状态），而非 _today_pending_count()
-       （计划文件）。手动补发 _run_job 正常发布成功只改 Article 表、不更新计划 done 标记 →
-       计划 remaining 会是 stale 值，导致白天误判"还有剩余"而不发。改用真实发布数后，
-       手动补发完也能在白天立即收到「全部完成」汇总，无需手动 resend。"""
+    触发策略（2026-10-16 加固）：
+      · 未配置群机器人 / 今天 0 篇已发布 且 无「缺 Key 被拦」记录 → 不发；
+      · 今天已发过（daily_summary_date==today）且非 force：
+          - 上次只发了「缺 Key 提示(keyfail)」且本次已有真实发布 → 允许升级为正式汇总
+            （修复 Key 后手动补跑，不漏发「全部完成」）；
+          - 否则 → 不重复发（一天最多一条正式汇总）；
+      · 真实剩余==0（含手动补发已发完）→ 发「全部完成」；
+      · 还有真实剩余 + 无批次在跑 / 深夜 → 发「今日还剩 N 篇」；
+      · 还有真实剩余 + 批次在跑 + 白天 → 暂不发，等发完或深夜；
+      · 0 篇发布 但 有「缺 Key 被硬拦」记录 → 发「今日未发布（缺少 API Key）」兜底提示，
+        让完全跳过的日子也能在合并汇总里被看到（不再只靠批次级即时消息）。
+    ⚠️ 剩余判断用 _real_pending_count()（DB 真实发布状态），而非计划文件 _today_pending_count()。
+       缺 Key 用户名单用 _today_key_failures()（批次硬拦时由 _record_key_failure 写入）。"""
     global _last_summary_pending_log
     if not notify.configured():
         return False
     today = datetime.now().strftime("%Y-%m-%d")
     sent_date = get_setting("daily_summary_date", "")
-    if sent_date == today and not force:
-        return False
+    sent_kind = get_setting("daily_summary_sent_kind", "")
     items = _build_today_summary_items()
-    if not items:
+    key_failures = _today_key_failures()
+    has_items = bool(items)
+    has_kf = bool(key_failures)
+    if not has_items and not has_kf:
         return False
+    if sent_date == today and not force:
+        # 已发过：仅当"上次只是缺 Key 提示、本次已有真发布"时允许升级为正式汇总，避免漏发「全部完成」
+        if not (sent_kind == "keyfail" and has_items):
+            return False
     real_remaining = _real_pending_count()
     if real_remaining > 0 and not force:
         batch_running = _batch_lock.locked()
@@ -2939,14 +2991,25 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
             return False
         # 无批次在跑 / 已到深夜 → 发「今日还剩 N 篇」（剩余的很可能是陈旧或已失败，通知用户）
     _last_summary_pending_log = -1
-    head = (f"## 📰 润致发布 · {today} 今日已发布 {len(items)} 篇"
-            + ("（全部完成 🎉）" if real_remaining == 0 else f"（今日还剩 {real_remaining} 篇）"))
-    tail = "全部完成 🎉" if real_remaining == 0 else "今日还剩 {0} 篇，将自动续发".format(real_remaining)
+    # —— 组装 head / tail ——
+    if has_items:
+        head = (f"## 📰 润致发布 · {today} 今日已发布 {len(items)} 篇"
+                + ("（全部完成 🎉）" if real_remaining == 0 else f"（今日还剩 {real_remaining} 篇）"))
+        tail = "全部完成 🎉" if real_remaining == 0 else "今日还剩 {0} 篇，将自动续发".format(real_remaining)
+    else:
+        head = f"## ⚠️ 润致发布 · {today} 今日未发布（缺少 API Key）"
+        tail = "今日无任何文章发布。修复 Key 后可手动补跑；未授权用户不会使用服务端默认 Key。"
+    # 缺 Key 被硬拦的用户：无论今天有没有成功发布，都在合并汇总里补一句（看得全）
+    if has_kf:
+        kf_lines = "\n".join(f"· {r.get('user', '?')}：{(r.get('err') or '')[:80]}" for r in key_failures)
+        tail = (tail + "\n\n⚠️ 今日以下用户因缺少 API Key 未发布（定时被硬拦）：\n" + kf_lines)
+    kind = "digest" if has_items else "keyfail"
     try:
         notify.send_daily_summary(head, items, tail)
         set_setting("daily_summary_date", today)
-        logger.info("已推送今日汇总（%d 篇，真实剩余 %d）daily_summary_date=%s force=%s",
-                    len(items), real_remaining, today, force)
+        set_setting("daily_summary_sent_kind", kind)
+        logger.info("已推送今日汇总（%d 篇，真实剩余 %d，缺Key用户 %d，kind=%s）daily_summary_date=%s force=%s",
+                    len(items), real_remaining, len(key_failures), kind, today, force)
         return True
     except Exception as e:  # noqa: BLE001
         logger.warning("推送今日汇总失败：%s", e)
