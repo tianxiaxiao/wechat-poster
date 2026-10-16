@@ -60,6 +60,13 @@ PROVIDERS = {
         "needs_api_key": True,
         "default_api_key_env": "OPENAI_COMPAT_API_KEY",
     },
+    "agnes": {
+        "label": "Agnes AI (云端)",
+        "default_base_url": "https://api.agnes-ai.cn/v1",
+        "default_model": "agnes-3.0-flash",
+        "needs_api_key": True,
+        "default_api_key_env": "AGNES_API_KEY",
+    },
 }
 
 

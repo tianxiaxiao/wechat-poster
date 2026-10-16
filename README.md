@@ -366,6 +366,7 @@ node tests/render_check_users.js           # 用户管理每行按钮是否真�
 node tests/render_check_schedule_admin.js  # 定时总览面板
 node tests/render_check_status_ip.js       # 状态徽章颜色/位置、取 Key 直达链接、出口 IP 条
 node tests/render_check_sched_topics.js    # 「🕒 定时任务」标记/按键/弹层，且勾选真的落库
+node tests/render_check_agnes_provider.js  # 新增 Agnes AI 云端选项出现在下拉、选中后 base_url 预填且锁定、标签刷新（并修复切换 provider 不刷新标签的既有 bug）
 ```
 
 渲染断言检查的是「改完 CSS/HTML 后页面**真的**长对了」：读计算样式、量行高与横向溢出、

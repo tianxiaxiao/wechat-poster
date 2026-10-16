@@ -60,6 +60,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .badge-provider-deepseek { background: #ede9fe; color: #6d28d9; }
 .badge-provider-ollama { background: #fef3c7; color: #b45309; }
 .badge-provider-openai_compat { background: #cffafe; color: #155e75; }
+.badge-provider-agnes { background: #e0f2fe; color: #0369a1; }
 .cancel-btn { font-size: 0.7rem; padding: 0.18rem 0.6rem; border: 1px solid #fecaca; background: #fff; color: #dc2626; border-radius: 0.375rem; cursor: pointer; font-weight: 600; white-space: nowrap; }
 .cancel-btn:hover { background: #fef2f2; }
 .cancel-btn:active { transform: translateY(1px); }
@@ -925,8 +926,9 @@ const PROVIDER_HINTS = {
   deepseek: '☁️ 云端。默认 https://api.deepseek.com/v1 · deepseek-chat · 需要 API Key',
   ollama: '💻 本地。默认 http://localhost:11434/v1 · qwen2.5:7b / llama3:8b · 先运行 ollama serve',
   openai_compat: '🔌 通用，兼容 vLLM / llama.cpp server / LM Studio / OneAPI。默认 http://localhost:8000/v1',
+  agnes: '🤖 云端 Agnes AI。默认 https://api.agnes-ai.cn/v1 · agnes-3.0-flash · 需要 API Key',
 };
-const PROVIDER_LABEL = { deepseek:'☁️ DeepSeek', ollama:'💻 Ollama 本地', openai_compat:'🔌 OpenAI 兼容' };
+const PROVIDER_LABEL = { deepseek:'☁️ DeepSeek', ollama:'💻 Ollama 本地', openai_compat:'🔌 OpenAI 兼容', agnes:'🤖 Agnes AI' };
 let PROVIDER_LIST = [];
 
 function loadStored() {
@@ -969,12 +971,16 @@ function applyProviderToFields() {
 //    只有管理员在「用户管理」里勾选「授权共享模型」后，才允许回落到共享 Key（2026-10-16）。
 // ⚠️ 必须由**所有** provider 入口调用：打开设置、选快捷预设、直接切下拉。
 function lockProviderFields(id) {
-  const deep = (id === 'deepseek');
-  if (deep) $('#base_url').value = 'https://api.deepseek.com/v1';
-  $('#base_url').readOnly = deep;
-  $('#base_url').title = deep ? 'DeepSeek 使用官方固定地址，不可修改' : '';
+  // DeepSeek / Agnes 的 base_url 是官方固定地址，锁定为只读（用户只需填 Key）。
+  const fixed = (id === 'deepseek' || id === 'agnes');
+  if (id === 'deepseek') $('#base_url').value = 'https://api.deepseek.com/v1';
+  if (id === 'agnes') $('#base_url').value = 'https://api.agnes-ai.cn/v1';
+  $('#base_url').readOnly = fixed;
+  $('#base_url').title = fixed ? '官方固定地址，不可修改' : '';
   $('#api_key').readOnly = false;
-  $('#api_key').placeholder = deep ? 'sk-…（你自己的 DeepSeek Key）' : 'sk-... / 本地模型可留空';
+  $('#api_key').placeholder = (id === 'deepseek') ? 'sk-…（你自己的 DeepSeek Key）'
+                            : (id === 'agnes') ? 'sk-…（你自己的 Agnes Key）'
+                            : 'sk-... / 本地模型可留空';
   $('#api_key').title = '';
 }
 
@@ -1200,6 +1206,7 @@ function refreshProviderTag(id) {
 // 内置常见开源本地模型 + 用户专属地址；用户也可把当前填写存为「我的预设」
 const MODEL_PRESETS = [
   { name: '☁️ DeepSeek 云端（默认）', provider:'deepseek', base_url:'https://api.deepseek.com/v1', model:'deepseek-chat', api_key:'' },
+  { name: '🤖 Agnes AI 云端', provider:'agnes', base_url:'https://api.agnes-ai.cn/v1', model:'agnes-3.0-flash', api_key:'' },
   { name: '💻 Ollama 本地 · qwen2.5:7b', provider:'openai_compat', base_url:'http://localhost:11434/v1', model:'qwen2.5:7b', api_key:'' },
   { name: '💻 Ollama 本地 · qwen3:8b', provider:'openai_compat', base_url:'http://localhost:11434/v1', model:'qwen3:8b', api_key:'' },
   { name: '💻 Ollama 本地 · qwen2.5:14b', provider:'openai_compat', base_url:'http://localhost:11434/v1', model:'qwen2.5:14b', api_key:'' },
@@ -1315,6 +1322,7 @@ $('#provider').addEventListener('change', () => {
   setLlmTestStatus('idle', '');
   markKeyHintDirty();
   refreshKeyControls();            // 换来源后，「去获取 Key」要指向新平台的 Key 页面
+  refreshProviderTag(id);          // ★ 换来源后必须刷新顶部标签，否则标签停留在旧来源（如 DeepSeek）
 });
 // 手动改了 Address / Key / Model → 提示"尚未生效"
 ['#api_key', '#base_url', '#model'].forEach(sel => {
