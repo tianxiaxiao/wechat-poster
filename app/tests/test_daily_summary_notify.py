@@ -16,6 +16,9 @@
   11. 有发布 / 有缺 Key 记录 → 发 digest 且 tail 含缺 Key 提示（合并摘要看得全）
   12. keyfail 已发过 / 后来有发布 → 升级发 digest（不漏「全部完成」）
   13. keyfail 已发过 / 仍 0 发布 → 不重复发
+  —— 链接自愈（微信发表有收录延迟，首条汇总可能漏链接）——
+  16. 上次 digest 链接不全 + 本次已补全 → 允许再发一次带链接汇总
+  17. 上次无链接 + 本次仍无链接 → 不重复发（避免刷屏，等链接就绪再自愈）
 
 运行：在 app/ 目录下 `python tests/test_daily_summary_notify.py`
 （import app 需要从 app/ 目录解析 from db import ...）
@@ -34,6 +37,7 @@ import app
 
 TODAY = "2026-10-16"
 ITEM = [{"title": "A", "publish_id": "1", "url": "u", "theme": "t", "topic": "A", "status": "published"}]
+NO_URL_ITEM = [{"title": "A", "publish_id": "1", "url": "", "theme": "t", "topic": "A", "status": "published"}]
 
 
 def _fake_dt(hour: int):
@@ -50,7 +54,7 @@ def _fake_dt(hour: int):
     return _DT
 
 
-def _fake_get_setting(date_val="", kind_val="", sig_val=""):
+def _fake_get_setting(date_val="", kind_val="", sig_val="", links_ok_val="1"):
     def _g(key, default=""):
         if key == "daily_summary_date":
             return date_val
@@ -58,19 +62,21 @@ def _fake_get_setting(date_val="", kind_val="", sig_val=""):
             return kind_val
         if key == "daily_summary_sig":
             return sig_val
+        if key == "daily_summary_links_ok":
+            return links_ok_val
         return default
     return _g
 
 
 def _run(force=False, configured=True, items=None, real_remaining=0, marker="", hour=18,
-         batch_locked=False, key_failures=None, sent_kind="", sig_val=""):
+         batch_locked=False, key_failures=None, sent_kind="", sig_val="", links_ok_val="1"):
     items = ITEM if items is None else items
     kf = key_failures if key_failures is not None else []
     fake_lock = MagicMock()
     fake_lock.locked.return_value = batch_locked
     with patch.object(app.notify, "configured", return_value=configured), \
          patch.object(app.notify, "send_daily_summary", return_value=[{"errcode": 0}]) as send_mock, \
-         patch.object(app, "get_setting", side_effect=_fake_get_setting(marker, sent_kind, sig_val)) as get_mock, \
+         patch.object(app, "get_setting", side_effect=_fake_get_setting(marker, sent_kind, sig_val, links_ok_val)) as get_mock, \
          patch.object(app, "set_setting") as set_mock, \
          patch.object(app, "_build_today_summary_items", return_value=items) as items_mock, \
          patch.object(app, "_real_pending_count", return_value=real_remaining), \
@@ -99,11 +105,12 @@ def main():
     # 3. 正常：已发布 + 未发过 + 真实剩余==0（含手动补发已发完）→ 发 + 写标记
     sent, send, get, set_, items = _run(marker="", real_remaining=0)
     check("③ 已发布/未发过/真实剩余0 → 发送「全部完成」", sent is True and send.call_count == 1)
-    check("③ 发送后写入 daily_summary_date / sent_kind=digest / sig 标记",
-          set_.call_count == 3
+    check("③ 发送后写入 daily_summary_date / sent_kind=digest / sig / links_ok 标记",
+          set_.call_count == 4
           and ("daily_summary_date", TODAY) in [c.args for c in set_.call_args_list]
           and ("daily_summary_sent_kind", "digest") in [c.args for c in set_.call_args_list]
-          and ("daily_summary_sig", "1") in [c.args for c in set_.call_args_list])
+          and ("daily_summary_sig", "1") in [c.args for c in set_.call_args_list]
+          and ("daily_summary_links_ok", "1") in [c.args for c in set_.call_args_list])
 
     # 4. 今天已对"同一批文章"发过（date==今日 且 sig 相同）→ 不重复发
     sent, send, get, set_, items = _run(marker=TODAY, sig_val="1", real_remaining=0)
@@ -152,6 +159,18 @@ def main():
     # 13. keyfail 已发过 + 仍0发布 → 不重复发
     sent, send, get, set_, items = _run(marker=TODAY, sent_kind="keyfail", items=[], key_failures=kf)
     check("⑬ keyfail已发/仍0发布 → 不重复发", sent is False and send.call_count == 0)
+
+    # 16. 自愈：上次发的 digest 链接不全（links_ok=0），本次链接已补全 → 允许再发一次带链接汇总
+    sent, send, get, set_, items = _run(marker=TODAY, sent_kind="digest", sig_val="1",
+                                        links_ok_val="0", real_remaining=0)
+    check("⑯ 上次链接不全+本次已补全 → 自愈补发带链接汇总",
+          sent is True and send.call_count == 1
+          and ("daily_summary_links_ok", "1") in [c.args for c in set_.call_args_list])
+
+    # 17. 自愈上限：上次链接不全 + 本次仍无链接 → 不重复发（避免刷屏；等链接就绪再自愈）
+    sent, send, get, set_, items = _run(marker=TODAY, sent_kind="digest", sig_val="1",
+                                        links_ok_val="0", real_remaining=0, items=NO_URL_ITEM)
+    check("⑰ 上次无链接+本次仍无链接 → 不重复发", sent is False and send.call_count == 0)
 
     # 14/15. _record_key_failure 写入 + _today_key_failures 读取 + 按用户去重
     store = {}

@@ -279,7 +279,9 @@ def fetch_recent_urls(limit: int = 40) -> dict:
 
     匹配方式：链接里的 mid 参数 == freepublish/submit 返回的 publish_id（精确）；
              标题作为兜底。
-    返回 {"by_mid": {publish_id: url}, "by_title": {title: url}}
+    ⚠️ 实测 mid 与 publish_id 并不相等，by_mid 无法用来匹配 Article.publish_id；
+       按 publish_id 取链接请直接用 fetch_publish_url(publish_id)（freepublish/get）。
+    返回 {"by_mid": {mid: url}, "by_title": {title: url}}
     """
     by_mid, by_title = {}, {}
     got = 0

@@ -3052,18 +3052,31 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
     has_kf = bool(key_failures)
     if not has_items and not has_kf:
         return False
+    # 本批文章链接是否齐全（决定汇总要不要带可点击链接）。
+    # 微信发表有收录延迟，首条汇总可能链接还没就绪 → 标记 links_ok=False，
+    # 等链接补全后由下面的「自愈」逻辑再补发一次带链接的汇总（避免永久无链接）。
+    links_ok = bool(items) and all((it.get("url") or "") for it in items)
     # 已汇总过的"今天文章集合"签名（按 publish_id）；集合变了（又有新文章发布）才重发，
     # 既保证「每次发布后都能收到今日汇总」（用户预期），又避免调度循环每 20s 刷屏。
     cur_sig = ",".join(sorted({str(it.get("publish_id") or "") for it in items if it.get("publish_id")}))
     prev_date = get_setting("daily_summary_date", "")
     prev_sig = get_setting("daily_summary_sig", "")
     prev_kind = get_setting("daily_summary_sent_kind", "")
-    # 今天已对同一批文章发过"正式汇总" → 跳过（同一批一天最多一条）
+    prev_links_ok = get_setting("daily_summary_links_ok", "0") == "1"
+    # 今天已对同一批文章发过"正式汇总"：
+    #   · 上次链接已齐全 → 跳过（同一批一天最多一条带链接汇总）；
+    #   · 上次链接不全、本次已补全 → 允许自愈补发一次（否则无链接汇总会永久留存）；
+    #   · 上次链接不全、本次仍不全 → 跳过（避免刷屏；等链接就绪后再自愈）。
     if prev_date == today and prev_sig == cur_sig and prev_kind == "digest" and not force:
-        return False
+        if not (not prev_links_ok and links_ok):
+            return False
     if prev_date == today and not force:
-        # 今天已发过：仅当"上次只是缺 Key 提示、本次有了真文章"或"文章集合变了（又有新文章）"才重发
-        if not ((prev_kind == "keyfail" and has_items) or (prev_sig != cur_sig)):
+        # 今天已发过：仅当以下情况才重发：
+        #   · 上次只是缺 Key 提示、本次有了真文章（修复 Key 后补跑）；
+        #   · 文章集合变了（又有新文章发布，sig 不同）；
+        #   · 上次链接不全、本次已补全（自愈补发带链接汇总，避免永久无链接）。
+        if not ((prev_kind == "keyfail" and has_items) or (prev_sig != cur_sig)
+                or (not prev_links_ok and links_ok)):
             return False
     real_remaining = _real_pending_count()
     if real_remaining > 0 and not force:
@@ -3095,6 +3108,7 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
         set_setting("daily_summary_date", today)
         set_setting("daily_summary_sent_kind", kind)
         set_setting("daily_summary_sig", cur_sig)
+        set_setting("daily_summary_links_ok", "1" if links_ok else "0")
         logger.info("已推送今日汇总（%d 篇，真实剩余 %d，缺Key用户 %d，kind=%s）daily_summary_date=%s force=%s",
                     len(items), real_remaining, len(key_failures), kind, today, force)
         return True
