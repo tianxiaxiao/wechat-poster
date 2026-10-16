@@ -49,6 +49,9 @@ class UserSetting(Base):
     # ⚠️ 空 = 未指定 ⇒ 发「该产品下全部主题」（旧行为，向后兼容）；非空 = 只发这些主题。
     # 由主界面主题区右上「🕒 定时任务」勾选同步，勾选即加、取消即删（2026-10-16 新增）
     schedule_topic_ids = Column(Text, default="")
+    # 质量精修开关（2026-10-17）：去AI味 + 深度润色 + 可读性优化。默认开（1）。
+    # 关掉可省一次 LLM 调用（省时/省钱），但初稿只带首稿级的去 AI 化，质量层三件事不生效。
+    quality_refine = Column(Integer, default=1)
 
 
 class Product(Base):
@@ -205,6 +208,10 @@ def _migrate_schema():
             if cols5 and "schedule_topic_ids" not in cols5:
                 # 定时任务主题：旧数据留空 = 未指定（发全部主题），不会突然变成"一篇不发"
                 c.execute(text("ALTER TABLE user_settings ADD COLUMN schedule_topic_ids TEXT DEFAULT ''"))
+                c.commit()
+            if cols5 and "quality_refine" not in cols5:
+                # 质量精修开关：旧数据默认 1（开），保持与首版一致的行为
+                c.execute(text("ALTER TABLE user_settings ADD COLUMN quality_refine INTEGER DEFAULT 1"))
                 c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")

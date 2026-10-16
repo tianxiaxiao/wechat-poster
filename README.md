@@ -367,6 +367,8 @@ node tests/render_check_schedule_admin.js  # 定时总览面板
 node tests/render_check_status_ip.js       # 状态徽章颜色/位置、取 Key 直达链接、出口 IP 条
 node tests/render_check_sched_topics.js    # 「🕒 定时任务」标记/按键/弹层，且勾选真的落库
 node tests/render_check_agnes_provider.js  # 新增 Agnes AI 云端选项出现在下拉、选中后 base_url 预填且锁定、标签刷新（并修复切换 provider 不刷新标签的既有 bug）
+python tests/test_quality_refine.py          # 质量精修 pass：refine_article 成功/异常回退 + _gen_with_dedup 接入（开/关/异常保留原稿）
+node tests/render_check_quality_refine.js    # 「质量精修」开关存在、默认勾选、保存后 API 持久化、可开回
 ```
 
 渲染断言检查的是「改完 CSS/HTML 后页面**真的**长对了」：读计算样式、量行高与横向溢出、

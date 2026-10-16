@@ -93,6 +93,7 @@ def main():
         "product_name": product.name if product else "",
         "product_intro": product.intro if product else "",
         "product_style": (product.style or "") if product else "",
+        "quality_refine": True,   # 手动发布默认开启质量精修
     }
     if account:
         wechat_api.set_account(account.appid, account.secret_enc)

@@ -322,6 +322,12 @@ button { line-height: 1.2; }
       </datalist>
       <div class="hint" id="provider-hint"></div>
 
+      <!-- 质量精修开关（2026-10-17）：去AI味 + 深度润色 + 可读性优化 -->
+      <label class="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none mt-1">
+        <input type="checkbox" id="quality_refine" class="w-4 h-4 text-emerald-600 rounded cursor-pointer" checked />
+        <span>🎚 质量精修（去 AI 味 + 深度润色 + 可读性优化）<span class="text-slate-400 font-normal">— 每篇多一次 LLM 精修，关掉更省时省钱</span></span>
+      </label>
+
       <!-- 连通测试状态：独占一行（避免文案把按钮挤到第二行），始终占位以免出现时抖动 -->
       <div id="llm-test-box" class="mt-4 pt-3 border-t border-dashed border-slate-200">
         <div id="llm-test-status" class="text-xs leading-4 min-h-4 break-all text-slate-400"></div>
@@ -1399,6 +1405,9 @@ async function loadUserSettings() {
     renderUserAcctCheckboxes(s.schedule_account_ids || []);
     // Key 归属状态（服务端判定）：说清"现在用的是谁的 Key"
     renderKeyPolicyHint(s.key_status, s.key_hint || '');
+    // 质量精修开关（默认开）
+    const qr = document.getElementById('quality_refine');
+    if (qr) qr.checked = (s.quality_refine !== false);  // 服务端未返回 / true 均视为开
   } catch(e) { /* 离线/未登录时静默 */ }
 }
 function renderUserProdOptions(sel) {
@@ -1435,6 +1444,8 @@ $('#settings-save').addEventListener('click', async () => {
     schedule_time: $('#user_sched_time').value || '10:00',
     schedule_account_ids: acctIds,
     schedule_product_id: parseInt($('#user_sched_product').value) || 0,
+    quality_refine: document.getElementById('quality_refine')
+                    ? document.getElementById('quality_refine').checked : true,
   };
   try {
     const r = await fetch('/api/user/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });

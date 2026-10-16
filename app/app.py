@@ -343,6 +343,27 @@ def _gen_with_dedup(topic: str, count: int, job: dict, log_sink: list,
         accepted.append(it)
         # 定稿的也进入比对池，供同批后续主题/篇目参考
         history.append({"title": it.get("title", ""), "body": it.get("body_md", "")})
+    # ── 质量精修 pass（2026-10-17）：每篇定稿后再过一遍
+    #       去AI味 + 深度润色 + 可读性优化（对应「质量层」三件事）。
+    #   由 job["quality_refine"] 控制开关（默认开）。失败则保留原稿，绝不静默丢稿。
+    if job.get("quality_refine", True) and accepted:
+        log_sink.append(f"  🎚 质量精修：对 {len(accepted)} 篇做「去AI味 + 深度润色 + 可读性优化」…")
+        for _a in accepted:
+            try:
+                refined = llm.refine_article(
+                    _a.get("title", ""), _a.get("body_md", ""), brand=job["brand"],
+                    provider=job.get("provider", "deepseek"),
+                    api_key=job.get("api_key", ""), base_url=job.get("base_url", ""),
+                    model=job.get("llm_model", ""),
+                    product_name=job.get("product_name", ""),
+                    product_intro=job.get("product_intro", ""),
+                    allow_env_key=bool(job.get("allow_env_key", True)),
+                )
+                if refined.get("body_md"):
+                    _a["title"] = refined.get("title") or _a["title"]
+                    _a["body_md"] = refined["body_md"]
+            except Exception as e:  # noqa: BLE001
+                logger.warning("质量精修失败，保留原稿：《%s》：%s", _a.get("title", ""), str(e)[:120])
     return accepted
 
 
@@ -1426,6 +1447,10 @@ class UserSettingsIn(BaseModel):
     #    改它请用主界面的「🕒 定时任务」勾选 → POST /api/user/schedule-topics。
     #    用 Optional + None 是为了「前端不带这个字段时不会被清空成 []」。
     schedule_topic_ids: Optional[list] = None
+    # 质量精修开关（去AI味 + 深度润色 + 可读性优化）。
+    # ⚠️ 同样用 Optional + None：前端「模型设置」页整份保存时，勾选框的值总会带上来；
+    #    但为稳妥仍只在非 None 时写库，避免将来新增页面忘记带此字段时把用户的开关清空。
+    quality_refine: Optional[bool] = None
 
 
 @app.get("/api/user/settings")
@@ -1463,6 +1488,8 @@ async def api_user_settings_get(request: Request):
         "schedule_product_id": s.schedule_product_id if s else 0,
         # 定时任务指定要发的主题 id（空 = 发该产品下全部主题）
         "schedule_topic_ids": _schedule_topic_ids(me["id"]),
+        # 质量精修开关（去AI味 + 深度润色 + 可读性优化）；默认开
+        "quality_refine": bool(s.quality_refine) if s else True,
         # 新增：Key 归属/授权状态（前端据此提示）
         "use_shared": use_shared,
         "can_use_shared": is_admin,        # 管理员本身即 Key 所有者，无需"授权"
@@ -1509,6 +1536,9 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
         if body.schedule_topic_ids is not None:
             fields["schedule_topic_ids"] = json.dumps(
                 [int(x) for x in body.schedule_topic_ids], ensure_ascii=False)
+        # 质量精修开关：同样只有显式传了才写，避免前端忘记带此字段时把用户开关清空
+        if body.quality_refine is not None:
+            fields["quality_refine"] = 1 if body.quality_refine else 0
         db_api.upsert_user_setting(me["id"], db=db, **fields)
     finally:
         db.close()
@@ -2608,6 +2638,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             "product_name": product.name if product else "",
             "product_intro": product.intro if product else "",
             "product_style": (product.style or "") if product else "",
+            # 质量精修开关：读该用户设置（默认开）。oneshot/旧全局定时无 us 时默认开。
+            "quality_refine": bool(us.quality_refine) if us else True,
             "account_appid": target_accounts[0].appid if target_accounts else "",
             "account_secret": target_accounts[0].secret_enc if target_accounts else "",
             "account_name": acc_names,

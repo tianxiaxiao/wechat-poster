@@ -504,6 +504,85 @@ def generate_articles(topic: str, count: int = 3, brand: str = "百秘一梳",
     return out
 
 
+# ---- 质量精修 pass（2026-10-17 新增） ----
+# 初稿生成后再过一遍：去 AI 味 + 深度润色 + 可读性优化（对应「质量层」三件事）。
+# 与首稿里已有的【去 AI 化·硬性清单】互为补充：首稿是"写的时候别太 AI"，
+# 这一道是"写完再请主编改一遍"，专门抓首稿残留的 AI 腔 / 平铺 / 可读性短板。
+REFINE_SYSTEM = """你是一位资深公众号主编，擅长把「AI 生成的初稿」改成「真人写的爆款软文」。
+我会给你一篇已经成型的公众号软文初稿（含标题与正文 markdown），请你在不改变核心事实、产品、人设和叙事顺序的前提下，做一轮精修，目标是让普通读者完全看不出是 AI 写的，并且更愿意读完、更愿意行动。
+
+【一、去 AI 味（最高优先级）】
+- 消灭一切"AI 腔"：删除书面连接词（首先/其次/最后/总而言之/综上所述/值得注意的是），删除大段排比，删除"不是…而是…""不仅…更…"式套路，删除结尾的升华总结与名言警句堆砌。
+- 把平滑的"正确的废话"换成有棱角的口语：允许口头禅、半截话、自我纠正（"说实话我当时也半信半疑"）、具体数字/时间/某人的原话。
+- 严禁文言/古风腔调；若产品素材含古籍典故，只留一两句白话带过。
+
+【二、深度润色】
+- 强化画面感：开头第一句必须是具体场景/冲突/悬念（不要背景铺垫、不要"说起XX"平铺）。
+- 中段补"只有真实经历才写得出"的细节：手感、声音、气味、用了多久、当时在想什么；产品名自然出现 2-3 次即可，不堆卖点。
+- 结尾用有亲和力的邀请式收尾（"你有什么经验愿意分享，欢迎留下你的宝贵信息"），像熟人聊完天自然问一句；禁止命令式催互动、禁止出现价格/链接/二维码。
+
+【三、可读性优化】
+- 正文用空行分段，每段 2-4 句，句子长短错落，避免一整段超过 120 字。
+- 适当用 **加粗**（每篇 2-4 处）强调关键句；可用 1 句 > 引用点睛；需要切节奏时可用 --- 分隔。
+- 总体 600-1000 字，读起来有呼吸感，不要模板堆砌。
+
+【输出要求】
+- 只做精修与润色，绝不重写核心故事、不改产品卖点、不编造新的事实。
+- 必须与输入是同一篇文，只是更"人味"、更顺、更好读。
+- 严格按下面 JSON 返回（最外层一个对象）：
+{
+  "title": "精修后的标题（保留原标题的好角度，只去 AI 腔、补点人味，16-26 字）",
+  "body_md": "精修后的正文 markdown（空行分段）"
+}"""
+
+
+def refine_article(title: str, body_md: str, brand: str = "百秘一梳",
+                   provider: str = "deepseek", api_key: str = "", base_url: str = "",
+                   model: str = "", product_name: str = "", product_intro: str = "",
+                   allow_env_key: bool = True) -> Dict:
+    """质量精修 pass：对一篇初稿做「去 AI 味 + 深度润色 + 可读性优化」三合一。
+
+    返回 {"title":..., "body_md":...}。失败时抛异常（由调用方决定是否回退原稿，绝不静默丢稿）。
+    客户端/模型解析与 _gen_batch 一致；openai_compat 走 openai SDK（精修无需 reasoning，
+    若模型返回空正文则抛异常，由上层回退）。"""
+    if not (title or body_md).strip():
+        raise ValueError("refine_article 收到空稿")
+    cfg = PROVIDERS.get(provider, PROVIDERS["deepseek"])
+    env_model_var = cfg.get("default_model_env") or (provider.upper() + "_MODEL")
+    final_model = (model or os.getenv(env_model_var, "") or cfg["default_model"]).strip()
+    if not final_model:
+        raise ValueError(f"provider={provider} 需要指定 model（如 qwen2.5:7b / llama3:8b）")
+    client = _make_client(provider, api_key=api_key, base_url=base_url, allow_env_key=allow_env_key)
+    client = client.with_options(timeout=LLM_TIMEOUT)
+    material = (product_intro or "").strip() or DEFAULT_PRODUCT_INTRO
+    user_msg = (
+        f"品牌/产品：{product_name or brand}\n\n"
+        f"【产品素材（仅作背景，不必照抄）】\n{material}\n\n"
+        f"【待精修的初稿】\n标题：{title}\n\n正文：\n{body_md}\n\n"
+        f"请按系统要求做一轮「去 AI 味 + 深度润色 + 可读性优化」精修，直接返回 JSON。"
+    )
+    kwargs = dict(model=final_model, messages=[
+        {"role": "system", "content": REFINE_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ], temperature=0.7, max_tokens=8000)
+    if provider != "ollama":
+        try:
+            kwargs["response_format"] = {"type": "json_object"}
+        except Exception:
+            pass
+    resp = client.chat.completions.create(**kwargs)
+    text = (resp.choices[0].message.content or "").strip()
+    if not text:
+        raise ValueError("精修返回为空（模型可能未输出正文）")
+    data = _parse_json_lenient(text)
+    if not isinstance(data, dict) or not (data.get("body_md") or "").strip():
+        raise ValueError("精修返回缺少 body_md")
+    return {
+        "title": (data.get("title") or title or "").strip(),
+        "body_md": data["body_md"].strip(),
+    }
+
+
 def _gen_batch(topic: str, count: int = 3, brand: str = "百秘一梳",
                extra_hint: str = "",
                provider: str = "deepseek", api_key: str = "",
