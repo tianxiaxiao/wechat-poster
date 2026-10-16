@@ -50,25 +50,27 @@ def _fake_dt(hour: int):
     return _DT
 
 
-def _fake_get_setting(date_val="", kind_val=""):
+def _fake_get_setting(date_val="", kind_val="", sig_val=""):
     def _g(key, default=""):
         if key == "daily_summary_date":
             return date_val
         if key == "daily_summary_sent_kind":
             return kind_val
+        if key == "daily_summary_sig":
+            return sig_val
         return default
     return _g
 
 
 def _run(force=False, configured=True, items=None, real_remaining=0, marker="", hour=18,
-         batch_locked=False, key_failures=None, sent_kind=""):
+         batch_locked=False, key_failures=None, sent_kind="", sig_val=""):
     items = ITEM if items is None else items
     kf = key_failures if key_failures is not None else []
     fake_lock = MagicMock()
     fake_lock.locked.return_value = batch_locked
     with patch.object(app.notify, "configured", return_value=configured), \
          patch.object(app.notify, "send_daily_summary", return_value=[{"errcode": 0}]) as send_mock, \
-         patch.object(app, "get_setting", side_effect=_fake_get_setting(marker, sent_kind)) as get_mock, \
+         patch.object(app, "get_setting", side_effect=_fake_get_setting(marker, sent_kind, sig_val)) as get_mock, \
          patch.object(app, "set_setting") as set_mock, \
          patch.object(app, "_build_today_summary_items", return_value=items) as items_mock, \
          patch.object(app, "_real_pending_count", return_value=real_remaining), \
@@ -97,17 +99,18 @@ def main():
     # 3. 正常：已发布 + 未发过 + 真实剩余==0（含手动补发已发完）→ 发 + 写标记
     sent, send, get, set_, items = _run(marker="", real_remaining=0)
     check("③ 已发布/未发过/真实剩余0 → 发送「全部完成」", sent is True and send.call_count == 1)
-    check("③ 发送后写入 daily_summary_date 与 sent_kind=digest 标记",
-          set_.call_count == 2
+    check("③ 发送后写入 daily_summary_date / sent_kind=digest / sig 标记",
+          set_.call_count == 3
           and ("daily_summary_date", TODAY) in [c.args for c in set_.call_args_list]
-          and ("daily_summary_sent_kind", "digest") in [c.args for c in set_.call_args_list])
+          and ("daily_summary_sent_kind", "digest") in [c.args for c in set_.call_args_list]
+          and ("daily_summary_sig", "1") in [c.args for c in set_.call_args_list])
 
-    # 4. 今天已发过（marker==今日）未强制 → 不重复发
-    sent, send, get, set_, items = _run(marker=TODAY, real_remaining=0)
-    check("④ 今日已发过且未强制 → 不重复发", sent is False and send.call_count == 0)
+    # 4. 今天已对"同一批文章"发过（date==今日 且 sig 相同）→ 不重复发
+    sent, send, get, set_, items = _run(marker=TODAY, sig_val="1", real_remaining=0)
+    check("④ 今日已对同一批文章发过且未强制 → 不重复发", sent is False and send.call_count == 0)
 
     # 5. 强制重发（即使今日已发过）
-    sent, send, get, set_, items = _run(marker=TODAY, real_remaining=0, force=True)
+    sent, send, get, set_, items = _run(marker=TODAY, sig_val="1", real_remaining=0, force=True)
     check("⑤ force=True → 无视标记重发", sent is True and send.call_count == 1)
 
     # 6. 有剩余 / 白天 / 批次在跑 / 未强制 → 暂不发（等发完/深夜）

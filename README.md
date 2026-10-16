@@ -353,7 +353,7 @@ python tests/test_topic_product_bind.py    # 主题按产品过滤 + 批量归�
 python tests/test_notify_theme.py          # 企业微信通知里的排版主题 + 旧库补列
 python tests/test_schedule_admin.py        # 管理员「定时总览 / 代管各用户定时」
 python tests/test_schedule_topics.py       # 定时任务要发哪些主题（含"整份保存不能清空它"）
-python tests/test_daily_summary_notify.py  # 每日汇总触发门槛+调度循环兜底（未配置/无文章/真实剩余0/已发过/强制/有剩余·批次在跑暂不发/无批次白天仍发/深夜/强制兜底/缺Key合并汇总兜底/keyfail升级digest/去重）
+python tests/test_daily_summary_notify.py  # 每日汇总触发门槛+调度循环兜底（未配置/无文章/真实剩余0/已发过/强制/有剩余·批次在跑暂不发/无批次白天仍发/深夜/强制兜底/缺Key合并汇总兜底/keyfail升级digest/去重）。⚠️ 去重已改为「按今日已发文章集合(publish_id)变化重发」——每天同一批文章只发一条，但每次有新文章发布都会再发，修复「一天一条把后续发布吞掉」；文章链接改用 fetch_publish_url(publish_id) 直取兜底（不再依赖 publish_id==URL内mid 的脆弱匹配）
 python tests/test_system_status.py         # 状态自检与出口 IP（含「体检不会发文」安全断言）
 python tests/test_guard_script.py          # 进程守护脚本（打桩，不会真的拉起服务）
 

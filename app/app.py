@@ -705,10 +705,34 @@ def _backfill_urls(job_id: str, rounds: int = 3, gap: int = 40):
                          if a.get("publish_id") and not a.get("url")]
             if not still:
                 return
-            if r < max(1, rounds) - 1:
-                time.sleep(gap)   # 等微信异步发布完成后再补一轮
+        if r < max(1, rounds) - 1:
+            time.sleep(gap)   # 等微信异步发布完成后再补一轮
     except Exception as e:  # noqa: BLE001
         logger.warning("回填文章链接异常：%s", str(e)[:120])
+    # 兜底：batchget 仍未取到链接的（微信收录延迟/异步发布，或 publish_id 与 URL 内 mid 不匹配导致
+    # by_mid 失配、标题又对不上导致 by_title 失配），改用 freepublish/get 按 publish_id 直取——
+    # 这是微信官方"凭 publish_id 取链接"的接口，不依赖 mid/标题匹配，最可靠；只对极少数缺失篇调用，配额可控。
+    try:
+        with jobs_lock:
+            job = jobs.get(job_id)
+            still = [a for a in (job.get("articles", []) if job else [])
+                     if a.get("publish_id") and not a.get("url")]
+        if still:
+            filled = 0
+            for a in still:
+                pid = str(a.get("publish_id"))
+                u = wechat_api.fetch_publish_url(pid)
+                if u:
+                    with jobs_lock:
+                        a["url"] = u
+                    filled += 1
+            if filled:
+                with jobs_lock:
+                    job = jobs.get(job_id)
+                    if job:
+                        job.setdefault("log", []).append(f"🔗 已按 publish_id 兜底补回 {filled} 篇链接")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("按 publish_id 兜底补链接失败：%s", str(e)[:120])
 
 
 def _launch_notify(job_id: str):
@@ -2827,17 +2851,27 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
         _batch_lock.release()
 
 
+# publish_id → 文章链接 的进程内缓存：fetch_publish_url(freepublish/get) 日配额极小，
+# 而调度循环每 20s 都会重算今日汇总，缓存保证每个 pid 最多直取一次，避免刷爆配额。
+_url_cache: dict = {}
+
+
 def _fetch_urls_with_retry(publish_ids, tries: int = 5, wait: float = 6.0) -> dict:
     """取「publish_id → 文章链接」映射，带重试。
 
     ⚠️ 微信「发表记录」有收录延迟：刚提交成功的文章立刻查不到（2026-10-06 实测，
-    末篇发布 2 秒后就汇总，导致通知里那一篇没有链接）。这里重试到全部拿到或超时，
-    最多等 (tries-1)×wait 秒（默认 24 秒），拿不到的只影响该篇链接，不影响发送。
+    末篇发布 2 秒后就汇总，导致通知里那一篇没有链接）。先重试 batchget（by_mid），
+    仍缺失的再用 freepublish/get 按 publish_id 直取（微信官方接口，不依赖 mid/标题匹配，最可靠）。
+    直取结果进 _url_cache，避免调度循环每 20s 重复消耗 freepublish/get 配额。
     """
     want = {str(x) for x in (publish_ids or []) if x}
     got = {}
     if not want:
         return got
+    # 先用缓存（命中则直接给，不再查接口）
+    for pid in want:
+        if pid in _url_cache:
+            got[pid] = _url_cache[pid]
 
     def _pull():
         try:
@@ -2845,6 +2879,7 @@ def _fetch_urls_with_retry(publish_ids, tries: int = 5, wait: float = 6.0) -> di
             for k, v in m.items():
                 if k in want and k not in got:
                     got[k] = v
+                    _url_cache[k] = v
         except Exception as e:
             logger.warning("取文章链接失败：%s", str(e)[:100])
 
@@ -2854,6 +2889,18 @@ def _fetch_urls_with_retry(publish_ids, tries: int = 5, wait: float = 6.0) -> di
             break
         time.sleep(wait)
         _pull()
+    # 兜底：batchget 仍未拿到的（mid/标题匹配不上），按 publish_id 直取（带缓存，配额可控）
+    if len(got) < len(want):
+        for pid in want:
+            if pid in got:
+                continue
+            try:
+                u = wechat_api.fetch_publish_url(pid)
+                if u:
+                    got[pid] = u
+                    _url_cache[pid] = u
+            except Exception:
+                pass
     if len(got) < len(want):
         logger.warning("仍有 %d/%d 篇未取到链接（微信收录延迟，稍后可在网页刷新链接）",
                        len(want) - len(got), len(want))
@@ -2999,17 +3046,24 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
     if not notify.configured():
         return False
     today = datetime.now().strftime("%Y-%m-%d")
-    sent_date = get_setting("daily_summary_date", "")
-    sent_kind = get_setting("daily_summary_sent_kind", "")
     items = _build_today_summary_items()
     key_failures = _today_key_failures()
     has_items = bool(items)
     has_kf = bool(key_failures)
     if not has_items and not has_kf:
         return False
-    if sent_date == today and not force:
-        # 已发过：仅当"上次只是缺 Key 提示、本次已有真发布"时允许升级为正式汇总，避免漏发「全部完成」
-        if not (sent_kind == "keyfail" and has_items):
+    # 已汇总过的"今天文章集合"签名（按 publish_id）；集合变了（又有新文章发布）才重发，
+    # 既保证「每次发布后都能收到今日汇总」（用户预期），又避免调度循环每 20s 刷屏。
+    cur_sig = ",".join(sorted({str(it.get("publish_id") or "") for it in items if it.get("publish_id")}))
+    prev_date = get_setting("daily_summary_date", "")
+    prev_sig = get_setting("daily_summary_sig", "")
+    prev_kind = get_setting("daily_summary_sent_kind", "")
+    # 今天已对同一批文章发过"正式汇总" → 跳过（同一批一天最多一条）
+    if prev_date == today and prev_sig == cur_sig and prev_kind == "digest" and not force:
+        return False
+    if prev_date == today and not force:
+        # 今天已发过：仅当"上次只是缺 Key 提示、本次有了真文章"或"文章集合变了（又有新文章）"才重发
+        if not ((prev_kind == "keyfail" and has_items) or (prev_sig != cur_sig)):
             return False
     real_remaining = _real_pending_count()
     if real_remaining > 0 and not force:
@@ -3040,6 +3094,7 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
         notify.send_daily_summary(head, items, tail)
         set_setting("daily_summary_date", today)
         set_setting("daily_summary_sent_kind", kind)
+        set_setting("daily_summary_sig", cur_sig)
         logger.info("已推送今日汇总（%d 篇，真实剩余 %d，缺Key用户 %d，kind=%s）daily_summary_date=%s force=%s",
                     len(items), real_remaining, len(key_failures), kind, today, force)
         return True
