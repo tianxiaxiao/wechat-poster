@@ -2873,16 +2873,51 @@ def _today_pending_count() -> int:
         return 0
 
 
-def _ensure_daily_summary_sent(force: bool = False) -> bool:
-    """确保「每天一条」的企微汇总**今天至少发过一次**。
+# 暂不发分支的日志去重计数（调度循环每 20s 调一次 _ensure_daily_summary_sent，避免刷屏）
+_last_summary_pending_log = -1
 
-    ⚠️ 设计修复（2026-10-16）：原本每日汇总只挂在「定时批次跑到结尾」上 ——
-       一旦定时早退（如共享计划文件 bug）或靠手动补发，当天发了再多也收不到通知。
-       现改为**按"今天已发布且未通知"触发**，与批次是否跑完解耦：
-         · 今天还没发过任何文章 → 不发；
-         · 还有剩余待发且未到深夜（hour<23） → 不发「全部完成」，等发完或深夜/强制再发；
-         · 全部发完 / 已到深夜(>=23) / force → 发，并用 daily_summary_date 标记今天已发过，避免一天多条。
-    返回是否实际发送（便于接口/日志判断）。"""
+
+def _real_pending_count() -> int:
+    """今天真实未发完的篇数 = 今天计划总篇数 - 今天已 published 篇数（DB 交叉校验）。
+
+    ⚠️ 为什么不能再用 _today_pending_count（计划文件）：手动补发走 _run_job，
+       正常发布成功只改 Article 表、从不更新计划文件的 done 标记 → 计划 remaining 是 stale 值，
+       会导致白天误判"还有剩余"而不发汇总。改用真实发布数后，手动补发完也能立即收到「全部完成」汇总。"""
+    try:
+        plan = _plan_load()
+        today = datetime.now().strftime("%Y-%m-%d")
+        plan_total = len(plan.get("items") or []) if plan.get("date") == today else 0
+        # 今天已 published 篇数（北京时间 0 点口径，与 _build_today_summary_items 一致）
+        bj = datetime.utcnow() + timedelta(hours=8)
+        utc_start = bj.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
+        db = SessionLocal()
+        try:
+            pub_n = db.query(Article).filter(Article.created_at >= utc_start,
+                                             Article.status == "published").count()
+        finally:
+            db.close()
+        return max(plan_total - pub_n, 0)
+    except Exception:
+        return 0
+
+
+def _ensure_daily_summary_sent(force: bool = False) -> bool:
+    """确保「每天一条」的企微汇总**今天至少发过一次**（与批次是否跑完解耦）。
+
+    触发策略：
+      · 未配置群机器人 / 今天 0 篇已发布 → 不发；
+      · 今天已发过（daily_summary_date==today）且非 force → 不发（一天最多一条）；
+      · 真实剩余==0（今天计划篇已全部 published，含手动补发已发完）→ 发「全部完成」；
+      · 还有真实剩余：
+          - force → 发（人工兜底，无视一切）；
+          - 当前无批次在跑（_batch_lock 空闲）→ 剩余的很可能是陈旧/已失败，发「今日还剩 N 篇」提醒；
+          - 当前有批次在跑 且 未到深夜(hour<23) 且非 force → 暂不发，等发完或深夜再发；
+          - 已到深夜(hour>=23) 且非 force → 发「今日还剩 N 篇」（当天最后兜底）。
+    ⚠️ 关键修复：剩余判断用 _real_pending_count()（DB 真实发布状态），而非 _today_pending_count()
+       （计划文件）。手动补发 _run_job 正常发布成功只改 Article 表、不更新计划 done 标记 →
+       计划 remaining 会是 stale 值，导致白天误判"还有剩余"而不发。改用真实发布数后，
+       手动补发完也能在白天立即收到「全部完成」汇总，无需手动 resend。"""
+    global _last_summary_pending_log
     if not notify.configured():
         return False
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2892,17 +2927,26 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
     items = _build_today_summary_items()
     if not items:
         return False
-    remaining = _today_pending_count()
-    if remaining and not force and datetime.now().hour < 23:
-        logger.info("今日汇总暂不发：还有 %d 篇待发（hour<23），等发完或深夜再发", remaining)
-        return False
+    real_remaining = _real_pending_count()
+    if real_remaining > 0 and not force:
+        batch_running = _batch_lock.locked()
+        if batch_running and datetime.now().hour < 23:
+            # 批次还在发，且未到深夜 → 暂不发，等发完或深夜再发（日志去重，避免每 20s 刷屏）
+            if _last_summary_pending_log != real_remaining:
+                logger.info("今日汇总暂不发：仍有 %d 篇待发（批次运行中，hour<23），等发完或深夜再发",
+                            real_remaining)
+                _last_summary_pending_log = real_remaining
+            return False
+        # 无批次在跑 / 已到深夜 → 发「今日还剩 N 篇」（剩余的很可能是陈旧或已失败，通知用户）
+    _last_summary_pending_log = -1
     head = (f"## 📰 润致发布 · {today} 今日已发布 {len(items)} 篇"
-            + ("（全部完成 🎉）" if not remaining else f"（今日还剩 {remaining} 篇）"))
-    tail = "全部完成 🎉" if not remaining else "今日还剩 {0} 篇，将自动续发".format(remaining)
+            + ("（全部完成 🎉）" if real_remaining == 0 else f"（今日还剩 {real_remaining} 篇）"))
+    tail = "全部完成 🎉" if real_remaining == 0 else "今日还剩 {0} 篇，将自动续发".format(real_remaining)
     try:
         notify.send_daily_summary(head, items, tail)
         set_setting("daily_summary_date", today)
-        logger.info("已推送今日汇总（%d 篇）daily_summary_date=%s force=%s", len(items), today, force)
+        logger.info("已推送今日汇总（%d 篇，真实剩余 %d）daily_summary_date=%s force=%s",
+                    len(items), real_remaining, today, force)
         return True
     except Exception as e:  # noqa: BLE001
         logger.warning("推送今日汇总失败：%s", e)
@@ -3095,6 +3139,14 @@ def _scheduler_loop():
                         threading.Thread(target=_run_daily_batch, args=("续批",), daemon=True).start()
         except Exception:
             logger.exception("scheduler loop error")
+        # —— 每日汇总兜底（2026-10-16）——
+        # 即便定时早退 / 手动补发漏通知 / 批次收尾因 remaining 误判没发，
+        # 调度循环也按"今天已发布且未通知"周期性补推（一天最多一条，见 _ensure_daily_summary_sent）。
+        # 这样当天只要发了文章，企微汇总最终都会自动到达，无需再手动调 resend。
+        try:
+            _ensure_daily_summary_sent()
+        except Exception:
+            logger.exception("调度循环：每日汇总兜底异常")
         time.sleep(20)
 
 
