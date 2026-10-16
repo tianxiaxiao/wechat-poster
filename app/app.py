@@ -624,6 +624,12 @@ def _run_job(job_id: str):
             pass
         # 任务结束（done/failed 均经此）→ 若该 job 标记需通知且已配置群机器人，则异步推送结果
         _launch_notify(job_id)
+        # ⚠️ 修复（2026-10-16）：手动发布也要兜底发「今日汇总」（解耦批次跑完），
+        # 否则像今天这样手动补发 19 篇却收不到企微通知。_ensure_daily_summary_sent 自管一天一条。
+        try:
+            _ensure_daily_summary_sent()
+        except Exception:
+            pass
 
 
 def _backfill_urls(job_id: str, rounds: int = 3, gap: int = 40):
@@ -2139,23 +2145,38 @@ async def api_schedule_set(cfg: ScheduleIn, request: Request):
 @app.post("/api/daily/run")
 async def api_daily_run(request: Request):
     """手动触发一次「每日批次」（补跑用）：POST /api/daily/run
-    · 今日计划已全部完成 → 拒绝（避免重复发文）
-    · 否则立即在后台跑当天批次（服务常驻进程里执行，不受外部会话影响）；
-      按【当前操作人】自己的 LLM 配置与公众号列表发布，不干扰其他用户。"""
+    · 立即在后台跑当天批次（服务常驻进程里执行，不受外部会话影响）；
+      按【当前操作人】自己的 LLM 配置与公众号列表发布，不干扰其他用户。
+    · 批次起点会按"本用户的目标号+产品"重建今日计划（rebuild_plan=True），
+      因此即使当天已有其他用户/手动批次建过计划，也不会误判"已完成"而跳过；
+      真正已发过的篇由 _today_done_topics / 跨设备防重 跳过，不会重复发布。"""
     me = auth.need_role(request, "editor")
     today = datetime.now().strftime("%Y-%m-%d")
-    plan = _plan_load()
-    if plan.get("date") == today:
-        items = plan.get("items", [])
-        pending = [i for i in items if i.get("status") != "done"]
-        if items and not pending:
-            raise HTTPException(400, f"今日批次已完成（{len(items)} 篇），无需补跑")
     # 用操作人自己的配置跑（不传 account_ids → 由 _run_daily_batch 按其 UserSetting 解析）
     threading.Thread(target=_run_daily_batch,
-                    kwargs=dict(user_id=me["id"], reason="手动补跑"), daemon=True).start()
+                    kwargs=dict(user_id=me["id"], reason="手动补跑", rebuild_plan=True), daemon=True).start()
     logger.info("手动触发每日批次（补跑）用户#%s", me["id"])
     audit.audit(request, "job.daily", f"手动补跑今日批次（{today}）", user=me)
     return {"ok": True, "msg": f"已触发每日批次（{today}），后台执行，约 25 分钟"}
+
+
+@app.post("/api/daily/summary/resend")
+async def api_resend_daily_summary(request: Request):
+    """重发「今日汇总」到企业微信群（补通知用）：POST /api/daily/summary/resend
+
+    适用场景：今天其实发了文章、但企微没收到每日汇总（如定时早退 / 手动补发忘了开通知）。
+    · 强制重发（force=True）：无视"今天是否已发过"的标记，按当前已发布文章重新汇总推送；
+    · 返回 sent=是否实际发送（未配置群机器人 / 今天还没发过任何文章 → sent=false）。
+    仅管理员可调用（汇总含全站今日文章，属管理动作）。"""
+    me = auth.need_role(request, "admin")
+    if not notify.configured():
+        return {"ok": False, "sent": False,
+                "msg": "未配置 ROBOT_WEBHOOK_URL（企业微信群机器人），无法推送，请先在 NAS 环境变量配置"}
+    sent = _ensure_daily_summary_sent(force=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    audit.audit(request, "notify.resend", f"手动重发今日汇总（{today}）sent={sent}", user=me)
+    return {"ok": True, "sent": sent,
+            "msg": "已重发今日汇总到企业微信群" if sent else "今天还没有已发布的文章，无需发送"}
 
 
 # ========== 每日分批发布 ==========
@@ -2369,7 +2390,7 @@ def _topic_names_for_product(topic_rows, product_id: int) -> list:
 
 
 def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", schedule_product_id=0,
-                     mark_daily_run=False):
+                     mark_daily_run=False, rebuild_plan=False):
     """执行一个批次：把今天的发布计划发到「用户勾选的多个公众号」（多租户）。
     - 每个用户用自己的 LLM 配置（各人消耗各人的 Key）；每个公众号独立去重/草稿/发表；
     - 同一批主题会发到用户勾选的每一个号 ⇒ 实现"多个公众号同时定时发布"；
@@ -2527,14 +2548,20 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
 
         plan = _plan_load()
         today = datetime.now().strftime("%Y-%m-%d")
-        if plan.get("date") != today:
-            # 新的一天：重建计划，但保留昨天尚未补发完的手动发布篇（有正文/草稿的），避免丢失
+        if plan.get("date") != today or rebuild_plan:
+            # 重建计划：① 新的一天；② 本次是"每日批次起点"（定时触发 / 手动补跑）。
+            # ⚠️ 多租户关键修复（2026-10-16）：发布计划是按"日期"全局共享的单份文件。
+            # 若当天已有其他用户/手动批次先建过计划，本用户若不重建，就会看到"已全部完成"
+            # 而直接 return —— 导致该用户的定时发布被静默跳过（今天 09:30 即此 bug：
+            # 02:52 的 admin 手动批先把计划建好并标记完成，09:30 tianxiaxiao 的定时批次
+            # 据此判定"已完成"而一篇没发）。重建时用"本用户的目标号 + 产品"重新计算待发主题，
+            # 并由 _today_done_topics（微信端今日已发）/ 跨设备防重 跳过今天已发过的篇，不会重复发布。
             leftover = [it for it in plan.get("items", [])
                         if it.get("status") != "done" and (it.get("body_path") or it.get("draft_mid") or it.get("drafts"))]
             plan = _plan_init_today(topics, [a.id for a in target_accounts])
             if leftover:
                 plan["items"] = leftover + plan["items"]
-                logger.info("跨天保留未补发的 %d 篇（有正文/草稿）", len(leftover))
+                logger.info("跨天/重建保留未补发的 %d 篇（有正文/草稿）", len(leftover))
         plan["items"] = [it for it in plan.get("items", [])
                          if it.get("topic") in topics or it.get("draft_mid") or it.get("drafts") or it.get("body_path")]
         pending = [it for it in plan["items"] if not _item_done_for_accounts(it, target_ids)]
@@ -2542,6 +2569,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             logger.info("今日发布计划已全部完成")
             plan["next_ts"] = 0
             _plan_save(plan)
+            # ⚠️ 修复（2026-10-16）：即使早退也要兜底发今日汇总（解耦批次是否跑完）
+            _ensure_daily_summary_sent()
             return
 
         batch = pending[:BATCH_SIZE]
@@ -2733,37 +2762,26 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                               + (f"，下一批 {nxt_txt} 自动继续" if remaining else "，全部完成 🎉"))
         # 通知前先回填文章链接（一次 batchget 取最近 50 篇；逐篇 freepublish/get 会耗尽日配额）
         _backfill_urls(job_id)
-        # ===== 通知策略（2026-10-05 改为「每天一条」）=====
-        # · 当天全部发完 → 把当天所有文章合并成【一条】汇总推送（短链 + 主题，实测 20 篇≈3KB，单条可达）
-        # · 当天还没发完 → 不逐批打扰；仅在硬故障时单独告警（40164 IP 白名单 / 首次撞限 53501 / 23 点收尾）
+        # ===== 通知策略（2026-10-05 改为「每天一条」；2026-10-16 解耦批次跑完）=====
+        # · 每日汇总：交由 _ensure_daily_summary_sent() —— 按"今天已发布且未通知"触发，
+        #   全部发完/深夜/强制才发，与"批次是否跑到结尾"解耦（定时早退或手动补发也能兜底通知）。
+        # · 硬故障仍单独告警（40164 IP 白名单 / 首次撞限 53501），不挤占每日汇总额度。
         try:
             if notify.configured():
-                if not remaining:
-                    r = _build_today_summary_items()
-                    if r:
-                        head = f"## 📰 润致发布 · {datetime.now().strftime('%m月%d日')} 今日全部完成：共 {len(r)} 篇"
-                        tail = f"🎉 全部主题已发完{'（共 %d 批）' % batch_no if batch_no > 1 else ''}"
-                        notify.send_daily_summary(head, r, tail)
-                else:
-                    # 未完成时才可能发告警（保持"一天一条"的降噪目标）
-                    if ip_blocked:
-                        notify.send("## 🚨 发布失败：IP 白名单拦截（40164）",
-                                    "微信报 40164：本机公网 IP 不在 API IP 白名单，重试无效。\n"
-                                    "请到微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单 加上日志里的 IP。\n"
-                                    f"直达：{WL_PAGE}",
-                                    use_markdown=True)
-                    elif hit_limit and not plan.get("limit_alerted"):
-                        plan["limit_alerted"] = True
-                        _plan_save(plan)
-                        notify.send("## ⏳ 触发微信频率限制，本批提前结束",
-                                    f"已发 {ok_total} 篇，剩余 {len(remaining)} 篇将在 {nxt_txt} 自动重试（无需处理）。",
-                                    use_markdown=True)
-                    elif datetime.now().hour >= 23:
-                        r = _build_today_summary_items()
-                        if r:
-                            notify.send_daily_summary(
-                                f"## 📰 润致发布 · 今日收尾：已发 {len(r)} 篇",
-                                r, f"⏳ 今日还剩 {len(remaining)} 篇，将于明天继续")
+                if ip_blocked:
+                    notify.send("## 🚨 发布失败：IP 白名单拦截（40164）",
+                                "微信报 40164：本机公网 IP 不在 API IP 白名单，重试无效。\n"
+                                "请到微信开发者平台 → 公众号/服务号 → 基础信息 → API IP白名单 加上日志里的 IP。\n"
+                                f"直达：{WL_PAGE}",
+                                use_markdown=True)
+                elif hit_limit and not plan.get("limit_alerted"):
+                    plan["limit_alerted"] = True
+                    _plan_save(plan)
+                    notify.send("## ⏳ 触发微信频率限制，本批提前结束",
+                                f"已发 {ok_total} 篇，剩余 {len(remaining)} 篇将在 {nxt_txt} 自动重试（无需处理）。",
+                                use_markdown=True)
+                # 每日汇总（与批次是否跑完解耦）：全部发完/深夜/未发过 → 自动发
+                _ensure_daily_summary_sent()
         except Exception as e:
             logger.warning("批次通知失败：%s", e)
         logger.info("批次完成 job=%s 成功=%d/%d 剩余=%d", job_id, ok_total, len(batch), len(remaining))
@@ -2842,6 +2860,53 @@ def _build_today_summary_items() -> list:
         it["theme"] = it.get("theme") or theme_by_title.get(it["title"], "")
         it["url"] = urls.get(it["publish_id"], "")
     return items
+
+
+def _today_pending_count() -> int:
+    """今天发布计划里还剩几篇没发完（用于决定是否发「全部完成」汇总）。"""
+    try:
+        plan = _plan_load()
+        if plan.get("date") != datetime.now().strftime("%Y-%m-%d"):
+            return 0
+        return sum(1 for it in (plan.get("items") or []) if it.get("status") != "done")
+    except Exception:
+        return 0
+
+
+def _ensure_daily_summary_sent(force: bool = False) -> bool:
+    """确保「每天一条」的企微汇总**今天至少发过一次**。
+
+    ⚠️ 设计修复（2026-10-16）：原本每日汇总只挂在「定时批次跑到结尾」上 ——
+       一旦定时早退（如共享计划文件 bug）或靠手动补发，当天发了再多也收不到通知。
+       现改为**按"今天已发布且未通知"触发**，与批次是否跑完解耦：
+         · 今天还没发过任何文章 → 不发；
+         · 还有剩余待发且未到深夜（hour<23） → 不发「全部完成」，等发完或深夜/强制再发；
+         · 全部发完 / 已到深夜(>=23) / force → 发，并用 daily_summary_date 标记今天已发过，避免一天多条。
+    返回是否实际发送（便于接口/日志判断）。"""
+    if not notify.configured():
+        return False
+    today = datetime.now().strftime("%Y-%m-%d")
+    sent_date = get_setting("daily_summary_date", "")
+    if sent_date == today and not force:
+        return False
+    items = _build_today_summary_items()
+    if not items:
+        return False
+    remaining = _today_pending_count()
+    if remaining and not force and datetime.now().hour < 23:
+        logger.info("今日汇总暂不发：还有 %d 篇待发（hour<23），等发完或深夜再发", remaining)
+        return False
+    head = (f"## 📰 润致发布 · {today} 今日已发布 {len(items)} 篇"
+            + ("（全部完成 🎉）" if not remaining else f"（今日还剩 {remaining} 篇）"))
+    tail = "全部完成 🎉" if not remaining else "今日还剩 {0} 篇，将自动续发".format(remaining)
+    try:
+        notify.send_daily_summary(head, items, tail)
+        set_setting("daily_summary_date", today)
+        logger.info("已推送今日汇总（%d 篇）daily_summary_date=%s force=%s", len(items), today, force)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("推送今日汇总失败：%s", e)
+        return False
 
 
 def _current_public_ip(timeout: int = 10) -> str:
@@ -2983,7 +3048,7 @@ def _scheduler_loop():
                             threading.Thread(target=_run_daily_batch,
                                             kwargs=dict(user_id=us.user_id, account_ids=aids,
                                                         reason=reason, schedule_product_id=us.schedule_product_id,
-                                                        mark_daily_run=True), daemon=True).start()
+                                                        mark_daily_run=True, rebuild_plan=True), daemon=True).start()
             elif not us_rows and SCHED_CFG.get("enabled"):
                 # 向后兼容：旧版单全局定时（无人启用每用户定时时生效）
                 try:

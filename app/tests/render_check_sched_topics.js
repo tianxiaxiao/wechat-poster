@@ -69,6 +69,7 @@ const READ_EL = (sel) => {
     top: Math.round(r.top), bottom: Math.round(r.bottom),
     w: Math.round(r.width), h: Math.round(r.height),
     text: (el.textContent || "").trim(), cls: el.className,
+    title: (el.getAttribute("title") || "").trim(),
     cursor: cs.cursor, display: cs.display,
   };
 };
@@ -223,8 +224,8 @@ async function apiSchedTopics(page) {
     await p.waitForTimeout(1500);
     tag = await p.evaluate(READ_EL, "#sched-tag");
     check("★ 开了定时 → 显示出来", tag && tag.visible === true, tag ? `visible=${tag.visible}` : "缺失");
-    check("★ 标记里带着定时时刻", /09:30/.test(tag.text), tag.text);
-    check("★ 未指定主题时显示「全部主题」", /全部主题/.test(tag.text), tag.text);
+    check("★ 标记悬停提示里带着定时时刻", /09:30/.test(tag.title), tag.title);
+    check("★ 未指定主题时悬停提示显示「全部主题」", /全部主题/.test(tag.title), tag.title);
     check("★ 标记是 sky 系底色（不是被重映射成品牌红的 blue-*）",
           /badge-sched/.test(tag.cls), tag.cls.slice(0, 40));
     check("★ 标记排在体检徽章之后", await p.evaluate(() => {

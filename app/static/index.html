@@ -46,6 +46,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .badge-warn { background: #fef3c7; color: #b45309; }
 /* 定时任务标记（sky 系：注意 blue-* 已被重映射成品牌红 #E30012，不能用） */
 .badge-sched { background: #e0f2fe; color: #0369a1; }
+/* 标题栏状态徽章：固定一行，超宽则左右滚动（不换行、不把「退出」挤出） */
+.hdr-badges { overflow: hidden; min-width: 0; }
+.hdr-badges-track { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+.hdr-badges-track.scroll { animation: hdr-scroll 9s ease-in-out infinite alternate; }
+@keyframes hdr-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(var(--hdr-scroll-dist, 0px)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hdr-badges-track.scroll { animation: none; }
+}
 .badge-provider-deepseek { background: #ede9fe; color: #6d28d9; }
 .badge-provider-ollama { background: #fef3c7; color: #b45309; }
 .badge-provider-openai_compat { background: #cffafe; color: #155e75; }
@@ -106,19 +117,23 @@ button { line-height: 1.2; }
 <div class="max-w-3xl mx-auto px-5 py-7">
 
 <header class="mb-6">
-  <!-- 第一排：Logo + 标题 + 模型标签 -->
-  <div class="flex items-center gap-3 flex-nowrap">
+  <!-- 第一排：Logo + 标题（固定）+ 状态徽章（固定单行，超宽左右滚动）+ 用户/退出（右对齐） -->
+  <div class="flex items-center gap-3">
     <img src="/static/logo.png" alt="润致传媒 logo" class="h-9 w-9 object-contain rounded-lg shrink-0"
          onerror="this.style.display='none'" />
-    <h1 class="text-xl font-bold text-slate-900 flex items-center gap-2 whitespace-nowrap shrink-0">润致公众号自动发布工具
-      <span id="provider-tag" class="hidden"></span>
-      <!-- 模型标签之后：能不能正常生成/发布的状态（点击做一次真体检，不发文章） -->
-      <button id="health-badge" type="button" class="step-badge badge-pending cursor-pointer"
-              title="点一下做一次体检：模型能否连通 + 公众号凭证与 IP 白名单（都不会发布文章）">⚪ 体检中…</button>
-      <!-- 体检之后：有没有设每日定时。没设 → 整块不显示（避免"看起来有定时其实没有"） -->
-      <button id="sched-tag" type="button" class="step-badge badge-sched hidden cursor-pointer"
-              title="你已开启每日定时；点这里到主题区「🕒 定时任务」选择要发的主题">🕒 定时任务</button>
-    </h1>
+    <h1 class="text-xl font-bold text-slate-900 whitespace-nowrap shrink-0">润致公众号自动发布工具</h1>
+    <span id="provider-tag" class="hidden shrink-0"></span>
+    <!-- 状态徽章区：固定单行；内容超宽时左右滚动（不会换行、不会把「退出」挤出） -->
+    <div id="hdr-badges" class="hdr-badges flex-1 min-w-0">
+      <div id="hdr-badges-track" class="hdr-badges-track">
+        <!-- 模型标签之后：能不能正常生成/发布的状态（点击做一次真体检，不发文章） -->
+        <button id="health-badge" type="button" class="step-badge badge-pending cursor-pointer"
+                title="点一下做一次体检：模型能否连通 + 公众号凭证与 IP 白名单（都不会发布文章）">⚪ 体检中…</button>
+        <!-- 体检之后：有没有设每日定时。没设 → 整块不显示（避免"看起来有定时其实没有"） -->
+        <button id="sched-tag" type="button" class="step-badge badge-sched hidden cursor-pointer"
+                title="你已开启每日定时；点这里到主题区「🕒 定时任务」选择要发的主题">🕒 定时任务</button>
+      </div>
+    </div>
     <!-- 当前登录用户 + 退出（右上角；改密码入口已移入「用户管理」） -->
     <div class="ml-auto flex items-center gap-2 text-xs text-slate-500 whitespace-nowrap shrink-0">
       <span id="cur-user" class="whitespace-nowrap">…</span>
@@ -1109,19 +1124,23 @@ async function loadHealth(refresh) {
     b.className = 'step-badge badge-pending cursor-pointer';
     b.title = '读取状态失败：' + e.message;
   }
+  layoutHdrBadges();
 }
 // 标题栏「🕒 定时任务」标记：开了定时才显示（没开就隐藏，避免"看着有其实没有"）
 function applySchedTag(sc) {
   const tag = $('#sched-tag');
   if (!tag) return;
-  if (!sc || !sc.enabled) { tag.classList.add('hidden'); tag.textContent = '🕒 定时任务'; return; }
+  if (!sc || !sc.enabled) { tag.classList.add('hidden'); tag.textContent = '🕒 定时任务'; layoutHdrBadges(); return; }
   tag.dataset.time = sc.time || '';
   const n = (sc.topic_ids || []).length;
-  tag.textContent = n ? `🕒 定时任务 ${sc.time || ''} · ${n} 个主题` : `🕒 定时任务 ${sc.time || ''} · 全部主题`;
+  // 标题栏只放状态标识「🕒 定时任务」，时间/主题明细移到 title 悬停提示——
+  // 否则「标题 + 体检徽章 + 09:30·全部主题」在 max-w-3xl(768px) 里单行放不下会换行。
+  tag.textContent = '🕒 定时任务';
   tag.title = n
     ? `每天 ${sc.time || ''} 自动发布，只发你指定的 ${n} 个主题。点这里到主题区「🕒 定时任务」调整。`
     : `每天 ${sc.time || ''} 自动发布，发该产品下全部主题。点这里到主题区「🕒 定时任务」改成只发指定的主题。`;
   tag.classList.remove('hidden');
+  layoutHdrBadges();
 }
 // 只刷新标题栏「🕒 定时任务」标记：读 /api/user/settings（不探测、不碰体检徽章结论）
 async function refreshSchedTag() {
@@ -1140,6 +1159,20 @@ $('#sched-tag')?.addEventListener('click', () => {
   if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
   openSchedTopics();
 });
+// 标题栏状态徽章：内容超宽时让徽章轨道左右滚动（否则固定单行会被挤出/换行）
+function layoutHdrBadges() {
+  const box = document.getElementById('hdr-badges');
+  const track = document.getElementById('hdr-badges-track');
+  if (!box || !track) return;
+  const over = track.scrollWidth - box.clientWidth;
+  if (over > 1) {
+    track.style.setProperty('--hdr-scroll-dist', (-over) + 'px');
+    track.classList.add('scroll');
+  } else {
+    track.classList.remove('scroll');
+  }
+}
+window.addEventListener('resize', layoutHdrBadges);
 // 改了模型/Key 之后：旧结论已过期，明确提示"点一下重新体检"，不要继续显示绿/红
 function markHealthDirty() {
   const b = $('#health-badge');
@@ -1160,6 +1193,7 @@ function refreshProviderTag(id) {
   tag.className = 'step-badge badge-provider-' + id;
   tag.innerHTML = label;
   tag.classList.remove('hidden');
+  layoutHdrBadges();
 }
 
 // ================= 快捷预设（一键填入 Provider/BaseURL/Model/Key） =================
@@ -1885,7 +1919,12 @@ function applySchedTagFromLocal() {
   if (!tag || tag.classList.contains('hidden')) return;
   const t = (tag.dataset.time || '').trim();
   const n = SCHED_ALL ? 0 : SCHED_TOPICS.size;
-  tag.textContent = n ? `🕒 定时任务 ${t} · ${n} 个主题` : `🕒 定时任务 ${t} · 全部主题`;
+  // 可见文案统一为「🕒 定时任务」，时间/主题明细同步进 title 悬停提示
+  tag.textContent = '🕒 定时任务';
+  tag.title = n
+    ? `每天 ${t} 自动发布，只发你指定的 ${n} 个主题。点这里到主题区「🕒 定时任务」调整。`
+    : `每天 ${t} 自动发布，发该产品下全部主题。点这里到主题区「🕒 定时任务」改成只发指定的主题。`;
+  layoutHdrBadges();
 }
 
 async function openSchedTopics() {

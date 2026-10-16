@@ -125,6 +125,18 @@ Key 管理页（DeepSeek / 硅基流动 / 阿里云百炼 / 智谱 / 月之暗�
 > 相关接口：`POST /api/user/schedule-topics`（传全量 id 列表，空数组 = 恢复全部主题）。
 > 注意「模型设置」保存走的是 `POST /api/user/settings`，它**不会清空**这里指定的主题。
 
+### 企业微信「每日一条」汇总（2026-10-16 改进）
+
+汇总通知**与批次是否跑完解耦**：只要今天已发布过文章、且当天还没发过汇总，就会在以下任一时刻自动补发，避免「定时早退 / 手动补发却收不到通知」：
+
+- 定时批次跑到结尾（全部发完）时；
+- 定时批次早退（如计划被误判已完成）时也会兜底发；
+- 手动 `/api/run` 发布结束时（无论是否勾选「📲 完成后微信通知」）。
+
+> 触发门槛：还有剩余待发且未到深夜（23 点前）不发「全部完成」，等发完或深夜（≥23 点）再发；用 `daily_summary_date` 标记保证「一天最多一条」。
+
+**补通知入口**：若某天实际发了文章却没收到企微汇总（如本次修复前的定时早退），管理员可调用 `POST /api/daily/summary/resend` 强制重发当日汇总（无视当天已发标记）。仅管理员可用。
+
 ## 截图
 
 > 建议自行截图补充到 `docs/screenshots/`（仓库默认不附带真实业务数据截图）。
@@ -341,6 +353,7 @@ python tests/test_topic_product_bind.py    # 主题按产品过滤 + 批量归�
 python tests/test_notify_theme.py          # 企业微信通知里的排版主题 + 旧库补列
 python tests/test_schedule_admin.py        # 管理员「定时总览 / 代管各用户定时」
 python tests/test_schedule_topics.py       # 定时任务要发哪些主题（含"整份保存不能清空它"）
+python tests/test_daily_summary_notify.py  # 每日汇总与批次解耦：触发门槛（未配置/无文章/已发过/有剩余/深夜/强制）
 python tests/test_system_status.py         # 状态自检与出口 IP（含「体检不会发文」安全断言）
 python tests/test_guard_script.py          # 进程守护脚本（打桩，不会真的拉起服务）
 
