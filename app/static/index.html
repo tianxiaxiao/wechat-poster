@@ -44,6 +44,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC'
 .badge-ok { background: #dcfce7; color: #166534; }
 .badge-fail { background: #fee2e2; color: #991b1b; }
 .badge-warn { background: #fef3c7; color: #b45309; }
+/* 定时任务标记（sky 系：注意 blue-* 已被重映射成品牌红 #E30012，不能用） */
+.badge-sched { background: #e0f2fe; color: #0369a1; }
 .badge-provider-deepseek { background: #ede9fe; color: #6d28d9; }
 .badge-provider-ollama { background: #fef3c7; color: #b45309; }
 .badge-provider-openai_compat { background: #cffafe; color: #155e75; }
@@ -113,6 +115,9 @@ button { line-height: 1.2; }
       <!-- 模型标签之后：能不能正常生成/发布的状态（点击做一次真体检，不发文章） -->
       <button id="health-badge" type="button" class="step-badge badge-pending cursor-pointer"
               title="点一下做一次体检：模型能否连通 + 公众号凭证与 IP 白名单（都不会发布文章）">⚪ 体检中…</button>
+      <!-- 体检之后：有没有设每日定时。没设 → 整块不显示（避免"看起来有定时其实没有"） -->
+      <button id="sched-tag" type="button" class="step-badge badge-sched hidden cursor-pointer"
+              title="你已开启每日定时；点这里到主题区「🕒 定时任务」选择要发的主题">🕒 定时任务</button>
     </h1>
     <!-- 当前登录用户 + 退出（右上角；改密码入口已移入「用户管理」） -->
     <div class="ml-auto flex items-center gap-2 text-xs text-slate-500 whitespace-nowrap shrink-0">
@@ -162,14 +167,17 @@ button { line-height: 1.2; }
 
     <!-- 主题多选（勾选一个或多个，每个按"每主题篇数"各生成） -->
     <div>
-      <div class="flex items-center justify-between mb-0.5">
-        <span class="field-label mb-0"><span id="topic-scope-hint" class="font-normal text-slate-400"></span>选择主题（可多选，也可加自定义主题）</span>
+      <!-- 工具条（2026-10-16 前移：计数 + 全选/全不选 + 定时任务 单独一行，在「选择主题」标题之上） -->
+      <div id="topic-toolbar" class="flex items-center justify-between gap-2 mb-1 flex-wrap">
+        <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
         <span class="flex items-center gap-1.5">
-          <span id="topic-sel-hint" class="text-xs text-slate-400"></span>
           <button type="button" id="topic-sel-all-btn" class="px-1.5 py-[1px] text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="全选当前产品的全部主题">☑ 全选</button>
           <button type="button" id="topic-sel-none-btn" class="px-1.5 py-[1px] text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="取消所有已选主题（含临时主题）">☐ 全不选</button>
+          <!-- 定时任务：点开选择「每天定时发哪些主题」，勾选即加入、取消即移除 -->
+          <button type="button" id="topic-sched-btn" class="px-1.5 py-[1px] text-[11px] bg-sky-100 hover:bg-sky-200 text-sky-700 rounded cursor-pointer" title="选择每天定时任务要发的主题（勾选即加入，取消即移除）">🕒 定时任务</button>
         </span>
       </div>
+      <div class="field-label mb-0.5"><span id="topic-scope-hint" class="font-normal text-slate-400"></span>选择主题（可多选，也可加自定义主题）</div>
       <div id="topic-list" class="flex flex-wrap gap-1"></div>
       <div class="flex gap-1.5 mt-1.5">
         <input id="new_topic" type="text" class="field-input" placeholder="输入自定义主题后点「＋」加入勾选（如：鼻炎、便秘、脱发…）" />
@@ -331,6 +339,29 @@ button { line-height: 1.2; }
       <div id="user_acct_list" class="grid grid-cols-2 gap-1.5 max-h-40 overflow-auto pr-1"></div>
       <div class="text-[11px] text-amber-600 mt-1.5">说明：这里的设置只对你本人生效，且使用上方你自己的模型与 API Key。系统另有「全局定时」仅供未单独配置的部署使用。</div>
     </div>
+  </div>
+</div>
+
+<!-- ===== 定时任务主题 modal（2026-10-16 新增：每天定时发哪些主题，勾选即加入、取消即移除） ===== -->
+<div id="sched-topic-modal" class="settings-modal hidden">
+  <div class="settings-panel">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-lg font-bold text-slate-900">🕒 定时任务 · 要发的主题</h3>
+      <button class="modal-x text-slate-400 hover:text-slate-600 text-2xl leading-none cursor-pointer" data-close="sched-topic-modal">&times;</button>
+    </div>
+    <!-- ⚠️ 勾选框 / 多行按钮一律放在 .llm-fields 之外：那里的 CSS 会把 checkbox 撑满宽、把按钮挤出视野（本项目踩过） -->
+    <div class="mb-2">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <span id="sched-topic-hint" class="text-xs text-slate-500"></span>
+        <span class="flex items-center gap-1.5">
+          <button type="button" id="sched-topic-from-sel" class="px-2 py-0.5 text-[11px] bg-sky-100 hover:bg-sky-200 text-sky-700 rounded cursor-pointer" title="把主界面当前勾选的主题设为定时任务主题">用主界面勾选</button>
+          <button type="button" id="sched-topic-all" class="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="全部勾选（= 定时任务发下面全部主题）">☑ 全选</button>
+          <button type="button" id="sched-topic-reset" class="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 rounded cursor-pointer" title="清空指定 = 恢复「发该产品下全部主题」">↺ 全部主题</button>
+        </span>
+      </div>
+    </div>
+    <div id="sched-topic-list" class="grid grid-cols-2 gap-1.5 max-h-72 overflow-auto pr-1"></div>
+    <div id="sched-topic-note" class="text-[11px] text-slate-400 mt-2"></div>
   </div>
 </div>
 
@@ -1072,13 +1103,43 @@ async function loadHealth(refresh) {
     b.textContent = d.label || '⚪ 状态未知';
     b.dataset.overall = d.overall || '';
     b.title = (d.detail || '') + '\n\n（点一下重新体检；只会做一次最小模型请求 + 取一次 token，不会发布文章）';
+    applySchedTag(d.schedule);
   } catch (e) {
     b.textContent = '⚪ 状态未知';
     b.className = 'step-badge badge-pending cursor-pointer';
     b.title = '读取状态失败：' + e.message;
   }
 }
+// 标题栏「🕒 定时任务」标记：开了定时才显示（没开就隐藏，避免"看着有其实没有"）
+function applySchedTag(sc) {
+  const tag = $('#sched-tag');
+  if (!tag) return;
+  if (!sc || !sc.enabled) { tag.classList.add('hidden'); tag.textContent = '🕒 定时任务'; return; }
+  tag.dataset.time = sc.time || '';
+  const n = (sc.topic_ids || []).length;
+  tag.textContent = n ? `🕒 定时任务 ${sc.time || ''} · ${n} 个主题` : `🕒 定时任务 ${sc.time || ''} · 全部主题`;
+  tag.title = n
+    ? `每天 ${sc.time || ''} 自动发布，只发你指定的 ${n} 个主题。点这里到主题区「🕒 定时任务」调整。`
+    : `每天 ${sc.time || ''} 自动发布，发该产品下全部主题。点这里到主题区「🕒 定时任务」改成只发指定的主题。`;
+  tag.classList.remove('hidden');
+}
+// 只刷新标题栏「🕒 定时任务」标记：读 /api/user/settings（不探测、不碰体检徽章结论）
+async function refreshSchedTag() {
+  try {
+    const r = await fetch('/api/user/settings');
+    if (!r.ok) return;
+    const d = await r.json();
+    applySchedTag({ enabled: !!d.schedule_enabled, time: d.schedule_time || '',
+                    topic_ids: d.schedule_topic_ids || [] });
+  } catch (e) { /* 读不到就保持原样，不打扰用户 */ }
+}
 $('#health-badge')?.addEventListener('click', () => loadHealth(true));
+// 点「🕒 定时任务」标记 → 直接打开主题区的定时任务主题选择
+$('#sched-tag')?.addEventListener('click', () => {
+  const el = $('#topic-sched-btn');
+  if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+  openSchedTopics();
+});
 // 改了模型/Key 之后：旧结论已过期，明确提示"点一下重新体检"，不要继续显示绿/红
 function markHealthDirty() {
   const b = $('#health-badge');
@@ -1346,6 +1407,10 @@ $('#settings-save').addEventListener('click', async () => {
     }
     toast('✅ 已保存「我的设置」（模型 + 每日定时）', 2400);
     markHealthDirty();     // 模型/Key 变了 → 顶部状态徽章的旧结论已过期
+    // 定时开关/时刻可能刚改 → 只刷新「🕒 定时任务」标记。
+    // ⚠️ 这里**不能**用 loadHealth(false)：那会把刚被 markHealthDirty 清掉的旧结论又刷回来
+    //    （等于白重置，用户会以为"改完配置还是绿的"）。
+    refreshSchedTag();
   } catch(e) { toast('保存失败：' + e.message, 2600); return; }
   closeSettings();
 });
@@ -1740,6 +1805,118 @@ function saveSelTopics() {
   try { localStorage.setItem(selTopicsKey(), JSON.stringify([...SEL_TOPICS])); } catch(_) {}
 }
 
+// ============ 定时任务主题：勾选即加入、取消即移除（2026-10-16 新增）============
+// 语义：SCHED_TOPICS 为空 = 未指定 ⇒ 定时发「该产品下全部主题」（旧行为）；
+//      非空 = 定时只发这些主题。勾选框反映的就是服务器上的这份列表。
+let SCHED_TOPICS = new Set();     // 定时任务指定的主题 id
+let SCHED_ALL = true;             // true = 未指定（发全部）
+let _schedTopicSaving = false;
+
+async function loadSchedTopics() {
+  try {
+    const r = await fetch('/api/user/settings');
+    if (!r.ok) return;
+    const d = await r.json();
+    const ids = Array.isArray(d.schedule_topic_ids) ? d.schedule_topic_ids.map(x => parseInt(x)) : [];
+    SCHED_TOPICS = new Set(ids.filter(x => !isNaN(x)));
+    SCHED_ALL = SCHED_TOPICS.size === 0;
+  } catch (e) { /* 取不到就当"未指定"，不阻塞主界面 */ }
+}
+
+async function saveSchedTopics(quiet) {
+  if (_schedTopicSaving) return false;
+  _schedTopicSaving = true;
+  const ids = [...SCHED_TOPICS];
+  try {
+    const r = await fetch('/api/user/schedule-topics', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic_ids: ids }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || '保存失败');
+    SCHED_ALL = (d.topic_ids || []).length === 0;
+    if (!quiet) toast(SCHED_ALL ? '✅ 定时任务已恢复「发全部主题」' : `✅ 定时任务主题已更新（${(d.topic_ids||[]).length} 个）`, 2200);
+    return true;
+  } catch (e) {
+    toast('❌ 定时任务主题保存失败：' + e.message, 3200);
+    return false;
+  } finally { _schedTopicSaving = false; }
+}
+
+function renderSchedTopics() {
+  const el = $('#sched-topic-list');
+  if (!el) return;
+  const hint = $('#sched-topic-hint');
+  const note = $('#sched-topic-note');
+  const n = TOPICS.length;
+  if (hint) {
+    hint.textContent = SCHED_ALL
+      ? `当前：未指定 ⇒ 每天发【该产品下全部 ${n} 个主题】`
+      : `当前：只发勾选的 ${SCHED_TOPICS.size} 个主题（共 ${n} 个可选）`;
+  }
+  el.innerHTML = TOPICS.map(t => {
+    const on = SCHED_ALL || SCHED_TOPICS.has(t.id);
+    return `<label class="inline-flex items-center gap-1.5 px-1.5 py-[3px] rounded border cursor-pointer select-none text-[12px] leading-4 ${on?'border-sky-500 bg-sky-50 text-sky-800':'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}">
+      <input type="checkbox" class="sched-topic-cb w-3.5 h-3.5 accent-sky-600 shrink-0 cursor-pointer" data-id="${t.id}" ${on?'checked':''} />
+      ${esc(t.name)}
+    </label>`;
+  }).join('') || '<div class="text-xs text-slate-400 col-span-2">暂无主题，请先到「📚 主题库」添加。</div>';
+  el.querySelectorAll('.sched-topic-cb').forEach(cb => {
+    cb.addEventListener('change', async () => {
+      const id = parseInt(cb.dataset.id);
+      // 从"未指定"状态第一次取消勾选 → 先把全部主题落进列表，再移除这一个（否则语义会变成"全都不发"）
+      if (SCHED_ALL && !cb.checked) { TOPICS.forEach(t => SCHED_TOPICS.add(t.id)); SCHED_ALL = false; }
+      if (cb.checked) SCHED_TOPICS.add(id); else SCHED_TOPICS.delete(id);
+      if (!SCHED_TOPICS.size) { SCHED_ALL = true; }   // 全取消 = 回到"发全部主题"
+      const ok = await saveSchedTopics();
+      if (ok) { applySchedTagFromLocal(); }
+      renderSchedTopics();
+    });
+  });
+  if (note) {
+    note.textContent = '说明：① 改动立即生效，下一次定时就按新的走；② 临时自定义主题（未入库）不能进定时任务；'
+      + '③ 若定时用的产品和这里的主题不属于同一个产品，定时任务会跳过并通知你。';
+  }
+}
+
+// 本地同步标题栏标记（不重新打接口，避免每次勾选都体检一次）
+function applySchedTagFromLocal() {
+  const tag = $('#sched-tag');
+  if (!tag || tag.classList.contains('hidden')) return;
+  const t = (tag.dataset.time || '').trim();
+  const n = SCHED_ALL ? 0 : SCHED_TOPICS.size;
+  tag.textContent = n ? `🕒 定时任务 ${t} · ${n} 个主题` : `🕒 定时任务 ${t} · 全部主题`;
+}
+
+async function openSchedTopics() {
+  await loadTopics(false);          // 确保 TOPICS 是当前产品的
+  await loadSchedTopics();
+  renderSchedTopics();
+  $('#sched-topic-modal').classList.remove('hidden');
+}
+$('#topic-sched-btn')?.addEventListener('click', () => openSchedTopics());
+// 「用主界面勾选」：把主界面当前勾选的库主题直接设为定时任务主题
+$('#sched-topic-from-sel')?.addEventListener('click', async () => {
+  SCHED_TOPICS = new Set([...SEL_TOPICS]);
+  SCHED_ALL = SCHED_TOPICS.size === 0;
+  const ok = await saveSchedTopics();
+  if (ok) applySchedTagFromLocal();
+  renderSchedTopics();
+});
+$('#sched-topic-all')?.addEventListener('click', async () => {
+  SCHED_TOPICS = new Set(TOPICS.map(t => t.id));
+  SCHED_ALL = SCHED_TOPICS.size === 0;
+  const ok = await saveSchedTopics();
+  if (ok) applySchedTagFromLocal();
+  renderSchedTopics();
+});
+$('#sched-topic-reset')?.addEventListener('click', async () => {
+  SCHED_TOPICS = new Set(); SCHED_ALL = true;
+  const ok = await saveSchedTopics();
+  if (ok) applySchedTagFromLocal();
+  renderSchedTopics();
+});
+
 function prodName(pid) {
   if (!pid) return '通用';
   const p = (PRODUCTS || []).find(x => x.id === pid);
@@ -2083,7 +2260,7 @@ $('#acct-ip-copy').addEventListener('click', async () => {
   } catch (e) { toast('复制失败，请手动选中复制：' + ip, 3200); }
 });
 document.querySelectorAll('.modal-x').forEach(x => x.addEventListener('click', () => { $('#'+x.dataset.close).classList.add('hidden'); }));
-['prod-modal','acct-modal','topic-modal'].forEach(mid => { const el=$('#'+mid); el.addEventListener('click', (e)=>{ if(e.target===el) el.classList.add('hidden'); }); });
+['prod-modal','acct-modal','topic-modal','sched-topic-modal'].forEach(mid => { const el=$('#'+mid); el.addEventListener('click', (e)=>{ if(e.target===el) el.classList.add('hidden'); }); });
 
 // 二维码 modal 关闭
 function closeQR(){ $('#qr-modal').classList.add('hidden'); }

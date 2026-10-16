@@ -23,6 +23,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from typing import Optional
 
 from db import (init_db, Article, Account, Product, Topic, SessionLocal, get_setting, set_setting,
                 User, AuditLog, UserSetting)
@@ -1414,6 +1415,11 @@ class UserSettingsIn(BaseModel):
     schedule_time: str = "10:00"
     schedule_account_ids: list = []   # 勾选定时发布的自有公众号 id 列表
     schedule_product_id: int = 0
+    # 定时任务要发的主题 id 列表；空 = 未指定（发该产品下全部主题）。
+    # ⚠️ 这个字段**不通过本接口改动**（本接口是「模型设置」页整份保存，前端不带它），
+    #    改它请用主界面的「🕒 定时任务」勾选 → POST /api/user/schedule-topics。
+    #    用 Optional + None 是为了「前端不带这个字段时不会被清空成 []」。
+    schedule_topic_ids: Optional[list] = None
 
 
 @app.get("/api/user/settings")
@@ -1449,6 +1455,8 @@ async def api_user_settings_get(request: Request):
         "schedule_time": s.schedule_time if s else "10:00",
         "schedule_account_ids": (json.loads(s.schedule_account_ids) if s and s.schedule_account_ids else []) if s else [],
         "schedule_product_id": s.schedule_product_id if s else 0,
+        # 定时任务指定要发的主题 id（空 = 发该产品下全部主题）
+        "schedule_topic_ids": _schedule_topic_ids(me["id"]),
         # 新增：Key 归属/授权状态（前端据此提示）
         "use_shared": use_shared,
         "can_use_shared": is_admin,        # 管理员本身即 Key 所有者，无需"授权"
@@ -1481,8 +1489,7 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
         if bad:
             raise HTTPException(400, f"以下公众号不属于你或无权限：{bad}")
         # ⚠️ llm_use_shared 只能由管理员在「用户管理」里授予，用户自己保存设置时**不允许**改动它
-        db_api.upsert_user_setting(
-            me["id"], db=db,
+        fields = dict(
             llm_provider=body.llm_provider, llm_base_url=(body.llm_base_url or "").strip(),
             llm_model=(body.llm_model or "").strip(), llm_api_key=body.llm_api_key or "",
             default_account_id=int(body.default_account_id or 0),
@@ -1491,6 +1498,12 @@ async def api_user_settings_set(body: UserSettingsIn, request: Request):
             schedule_account_ids=json.dumps(aids, ensure_ascii=False),
             schedule_product_id=int(body.schedule_product_id or 0),
         )
+        # 定时任务主题：只有显式传了才写 —— 「模型设置」页整份保存时不带这个字段，
+        # 若在这里默认写 [] 会把用户在主界面勾好的定时任务主题清空（2026-10-16）
+        if body.schedule_topic_ids is not None:
+            fields["schedule_topic_ids"] = json.dumps(
+                [int(x) for x in body.schedule_topic_ids], ensure_ascii=False)
+        db_api.upsert_user_setting(me["id"], db=db, **fields)
     finally:
         db.close()
     # 保存后立刻评估「这套配置能不能真的跑」——不能跑就给前端一条明确警告（发布时同样会被拦）
@@ -1687,10 +1700,14 @@ def api_system_status(request: Request, refresh: int = 0):
         acc = _pick_probe_account(me, db)
         acc_info = ({"id": acc.id, "name": acc.name, "appid": acc.appid} if acc else None)
         us = db_api.get_user_setting(uid, db)
+        _stids = _schedule_topic_ids(uid, db)
         sched = {"enabled": bool(us and us.schedule_enabled),
                  "time": (us.schedule_time if us else "10:00") or "10:00",
                  "last_run_date": (us.schedule_last_run_date if us else "") or "",
-                 "ran_today": bool(us and us.schedule_last_run_date == datetime.now().strftime("%Y-%m-%d"))}
+                 "ran_today": bool(us and us.schedule_last_run_date == datetime.now().strftime("%Y-%m-%d")),
+                 # 定时任务指定的主题（空 = 发该产品下全部主题）；主界面「🕒 定时任务」勾选同步
+                 "topic_ids": _stids,
+                 "topics_all": not _stids}
     finally:
         db.close()
 
@@ -1749,6 +1766,45 @@ def api_system_status(request: Request, refresh: int = 0):
     }
 
 
+class ScheduleTopicsIn(BaseModel):
+    """定时任务要发的主题 id 列表（主界面主题区「🕒 定时任务」勾选后提交）。
+    传空数组 = 清空指定 ⇒ 恢复「发该产品下全部主题」。"""
+    topic_ids: list = []
+
+
+@app.post("/api/user/schedule-topics")
+async def api_user_schedule_topics(body: ScheduleTopicsIn, request: Request):
+    """设置「定时任务要发哪些主题」——勾选即加、取消即删，调用方传全量列表。
+    ⚠️ 只校验主题是否存在且对该用户可见；不做整份设置覆盖，避免误清模型/Key。"""
+    me = auth.need_login(request)
+    is_admin = me["role"] == "admin"
+    try:
+        ids = [int(x) for x in (body.topic_ids or [])]
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "topic_ids 必须是数字列表")
+    db = SessionLocal()
+    try:
+        if ids:
+            q = db.query(Topic).filter(Topic.id.in_(ids))
+            scope = db_api.owner_scope_filter(Topic, me["id"], is_admin)
+            if scope is not None:
+                q = q.filter(scope)
+            ok_ids = sorted({t.id for t in q.all()})
+            bad = [x for x in ids if x not in set(ok_ids)]
+            if bad:
+                raise HTTPException(400, f"以下主题不存在或你无权使用：{bad}")
+        else:
+            ok_ids = []
+        db_api.upsert_user_setting(me["id"], db=db,
+                                   schedule_topic_ids=json.dumps(ok_ids, ensure_ascii=False))
+    finally:
+        db.close()
+    audit.audit(request, "schedule.topics",
+                f"定时任务主题：{'指定 ' + str(len(ok_ids)) + ' 个' if ok_ids else '清空（=发全部主题）'}",
+                user=me)
+    return {"ok": True, "topic_ids": ok_ids, "all_topics": not ok_ids}
+
+
 class AdminUserScheduleIn(BaseModel):
     """管理员代管某用户每日定时的入参（只管定时，不动其模型/Key）。"""
     schedule_enabled: bool = False
@@ -1793,6 +1849,10 @@ async def api_admin_user_schedules(request: Request):
                 "schedule_account_ids": aids,
                 "schedule_product_id": (s.schedule_product_id if s else 0) or 0,
                 "schedule_last_run_date": (s.schedule_last_run_date if s else "") or "",
+                # 定时任务指定的主题（空 = 发该产品下全部主题）
+                "schedule_topic_ids": _schedule_topic_ids(u.id, db),
+                "schedule_topic_names": [t.name for t in (db.query(Topic).filter(
+                    Topic.id.in_(_schedule_topic_ids(u.id, db))).all() if (s and s.schedule_topic_ids) else [])],
                 "allowed_account_ids": allowed,
                 "account_names": [acct_name.get(x, f"#{x}") for x in aids],
                 "product_name": next((p.name for p in products
@@ -2267,6 +2327,40 @@ def _item_done_for_accounts(it: dict, target_ids: list) -> bool:
     return set(int(x) for x in target_ids) <= das
 
 
+def _parse_int_list(raw, limit: int = 500) -> list:
+    """把 JSON 字符串（或列表）解析成 int 列表；坏数据返回 []（宁可"未指定"，也不要带着脏数据跑定时）。"""
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        out = []
+        for x in items:
+            try:
+                out.append(int(x))
+            except Exception:  # noqa: BLE001
+                continue
+        return out[:limit]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _schedule_topic_ids(user_id, db=None) -> list:
+    """定时任务指定要发的主题 id 列表；空 = 未指定（发该产品下全部主题）。"""
+    if not user_id:
+        return []
+    s = db_api.get_user_setting(user_id, db)
+    return _parse_int_list(s.schedule_topic_ids) if (s and s.schedule_topic_ids) else []
+
+
+def _filter_topics_for_schedule(topic_rows, topics: list, sel_ids) -> tuple:
+    """把「产品过滤后的主题名列表」再按【定时任务指定的主题 id】筛一遍。
+    返回 (最终主题名列表, 筛选前的条数)；sel_ids 为空表示未指定 → 原样返回。
+    ⚠️ 只保留**同时**满足「属于该产品」与「被定时任务指定」的主题：
+       用户勾了别的产品下的主题时会被丢掉，调用方据此判断是否要告警（否则会静默一篇不发）。"""
+    if not sel_ids:
+        return list(topics), len(topics)
+    keep = {t.name for t in topic_rows if t.id in set(sel_ids)}
+    return [n for n in topics if n in keep], len(topics)
+
+
 def _topic_names_for_product(topic_rows, product_id: int) -> list:
     """按产品过滤主题名：保留【该产品专属(product_id==pid)】与【通用(0/未设置)】的主题。
     用途：定时发布只发当前产品对应的主题 —— 保健功效类主题绑到木梳后，就不会出现在美食产品下（2026-10-16）。"""
@@ -2410,6 +2504,26 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             logger.warning("定时发布跳过：产品「%s」下无可用主题（专属与通用均为空）",
                            (product.name if product else "默认产品"))
             return
+
+        # ── 再按「定时任务指定的主题」过滤（2026-10-16 新增）──
+        # 主界面主题区「🕒 定时任务」里勾了哪些，定时就只发哪些；从没勾过（空）= 发上面全部。
+        sel_ids = set(_schedule_topic_ids(user_id))
+        topics, before = _filter_topics_for_schedule(topic_rows, topics, sel_ids)
+        if sel_ids:
+            if not topics:
+                # ★ 别静默跳过：「指定了主题但都不属于定时用的产品」用户必须知道，否则会以为定时坏了
+                msg = (f"定时任务已指定 {len(sel_ids)} 个主题，但没有一个属于产品"
+                       f"「{product.name if product else '默认产品'}」，本次不发布。"
+                       f"请到主界面主题区「🕒 定时任务」重新勾选该产品下的主题。")
+                logger.warning("定时发布跳过：%s", msg)
+                if notify.configured():
+                    try:
+                        notify.send("## ⚠️ 定时发布跳过：指定主题与产品不匹配", msg, use_markdown=True)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("跳过通知失败：%s", e)
+                return
+            logger.info("定时任务按指定主题发布：%d 个（产品下共 %d 个，已排除 %d 个）",
+                        len(topics), before, before - len(topics))
 
         plan = _plan_load()
         today = datetime.now().strftime("%Y-%m-%d")

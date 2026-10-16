@@ -77,12 +77,23 @@ JS_MAIN = """
     providerText: tag.textContent.trim(),
     providerHasModel: /deepseek-chat|gpt-|qwen|glm|claude|kimi|doubao/i.test(tag.textContent),
     // 只看页头第一排的按钮（第二排是功能入口，不算）
-    firstRowButtons: [...row.querySelectorAll('button')].map(b => b.textContent.trim()).filter(Boolean),
+    // 2026-10-16：#health-badge（状态徽章）与 #sched-tag（定时任务标记）都是**状态指示**不是导航按钮，
+    // 统计"头部还剩几个导航按钮"时必须排除，否则新增一个状态徽章就会把这个断言打挂。
+    firstRowButtons: [...row.querySelectorAll('button')]
+      .filter(b => b.id !== 'health-badge' && b.id !== 'sched-tag')
+      .map(b => b.textContent.trim()).filter(Boolean),
     // 2026-10-16：标题行新增「能否生成/发布」徽章，必须排在模型标签**之后**
     healthAfterTag: (() => {
       const b = document.getElementById('health-badge');
       if (!b || !tag) return null;
       return b.getBoundingClientRect().left >= tag.getBoundingClientRect().right - 2;
+    })(),
+    healthText: (document.getElementById('health-badge') || {}).textContent || '',
+    // 2026-10-16：「🕒 定时任务」标记：没开定时时必须**整块不显示**
+    schedTag: (() => {
+      const s = document.getElementById('sched-tag');
+      if (!s) return null;
+      return { hidden: s.classList.contains('hidden'), text: s.textContent.trim() };
     })(),
     pwFormInUsers: !!document.querySelector('#users-modal #pw-btn'),
     notifyDefaultChecked: !!document.querySelector('#notify_me')?.checked,
@@ -227,8 +238,11 @@ const {{ chromium }} = require('playwright-core');
         nav_btns = [b for b in btns if "体检" not in b and "状态" not in b and b != "⚪ 体检中…"]
         check("头部导航按钮只剩「退出」", nav_btns == ["退出"], str(btns))
         check("★ 标题行有生成/发布状态徽章（模型标签之后）",
-              any(("体检" in b or "状态" in b) for b in btns) and d.get("healthAfterTag") is True,
-              f"btns={btns} afterTag={d.get('healthAfterTag')}")
+              bool(d.get("healthText")) and d.get("healthAfterTag") is True,
+              f"health={d.get('healthText')!r} afterTag={d.get('healthAfterTag')}")
+        # 2026-10-16：新账号默认没开定时 ⇒ 「🕒 定时任务」标记必须**不显示**（避免"看着有其实没有"）
+        _st = d.get("schedTag") or {}
+        check("★ 未开启定时时「🕒 定时任务」标记不显示", _st.get("hidden") is True, str(_st))
         check("头部没有改密码按钮", not d.get("pwFormInHeader"), "")
         check("显示当前登录用户", "管理员" in (d.get("curUser") or ""), d.get("curUser", ""))
 

@@ -45,6 +45,10 @@ class UserSetting(Base):
     schedule_account_ids = Column(Text, default="")          # JSON list[int]：勾选要定时发布的自有公众号（空=用 default_account_id）
     schedule_product_id = Column(Integer, default=0)         # 定时使用的产品
     schedule_last_run_date = Column(String(16), default="")  # 当天已触发日期，防重复
+    # 定时任务要发的主题：JSON list[int]（Topic.id）。
+    # ⚠️ 空 = 未指定 ⇒ 发「该产品下全部主题」（旧行为，向后兼容）；非空 = 只发这些主题。
+    # 由主界面主题区右上「🕒 定时任务」勾选同步，勾选即加、取消即删（2026-10-16 新增）
+    schedule_topic_ids = Column(Text, default="")
 
 
 class Product(Base):
@@ -197,6 +201,10 @@ def _migrate_schema():
             if cols5 and "llm_use_shared" not in cols5:
                 # 共享模型授权：旧数据默认 0（未授权）。管理员自己是「Key 的所有者」，不受此限。
                 c.execute(text("ALTER TABLE user_settings ADD COLUMN llm_use_shared INTEGER DEFAULT 0"))
+                c.commit()
+            if cols5 and "schedule_topic_ids" not in cols5:
+                # 定时任务主题：旧数据留空 = 未指定（发全部主题），不会突然变成"一篇不发"
+                c.execute(text("ALTER TABLE user_settings ADD COLUMN schedule_topic_ids TEXT DEFAULT ''"))
                 c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")
