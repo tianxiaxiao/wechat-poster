@@ -46,6 +46,11 @@ const PID_PATH = args['publish-id-out'];
 const LOG_PATH = args.log;
 const NOPUB = (args.nopub || '').toUpperCase() === 'NOPUB';
 const SAVE_DRAFT_ONLY = (args['save-draft-only'] || '').toUpperCase() === 'TRUE';
+// 原创/赞赏开关：显式传 'false' 才关闭，缺省/其它值一律视为开启（保持历史行为：
+// 扫码模式与免扫码草稿模式都勾选原创+赞赏）。
+// 微信官方 API(draft/add) 不支持这两项，只有走本 playwright 编辑器 UI 流程才生效。
+const WANT_ORIGINAL = String(args.original || '').toUpperCase() !== 'FALSE';
+const WANT_REWARD = String(args.reward || '').toUpperCase() !== 'FALSE';
 
 // 日志：同时写文件 + 控制台
 const logStream = fs.createWriteStream(LOG_PATH, { flags: 'w' });
@@ -305,6 +310,7 @@ async function fetchEditorUrl(page) {
   }
 
   // ===== 3. 原创声明（与 pub_one.js 完全一致） =====
+  if (WANT_ORIGINAL) {
   await page.evaluate(() => {
     const el = Array.from(document.querySelectorAll('.appmsg-editor__setting-group')).find(e => /原创/.test(e.textContent) && e.childElementCount < 10);
     if (el) el.click();
@@ -346,8 +352,13 @@ async function fetchEditorUrl(page) {
   }, { AUTHOR });
   console.log('步骤3: 原创弹窗处理', JSON.stringify(original));
   await page.waitForTimeout(1500);
+  } else {
+    console.log('步骤3: 原创未开启（用户关闭），跳过原创声明');
+    await page.waitForTimeout(300);
+  }
 
   // ===== 4. 赞赏（与 pub_one.js 完全一致） =====
+  if (WANT_REWARD) {
   const rewardOpen = await page.evaluate(() => {
     const el = Array.from(document.querySelectorAll('.appmsg-editor__setting-group')).find(e => /赞赏/.test(e.textContent) && e.childElementCount < 10);
     if (el) el.click();
@@ -394,6 +405,10 @@ async function fetchEditorUrl(page) {
   }
   console.log('步骤4: 赞赏状态', JSON.stringify(rewardState));
   await page.waitForTimeout(1500);
+  } else {
+    console.log('步骤4: 赞赏未开启（用户关闭），跳过赞赏设置');
+    await page.waitForTimeout(300);
+  }
 
   if (NOPUB) {
     console.log('NOPUB: 仅验证，跳过发表');

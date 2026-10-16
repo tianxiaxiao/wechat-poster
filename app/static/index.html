@@ -225,6 +225,14 @@ button { line-height: 1.2; }
         <span class="text-[11px] text-slate-400 font-normal">(免扫码·发到发表记录)</span>
       </label>
       <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
+        <input type="checkbox" id="declare_original" checked class="w-3.5 h-3.5 text-indigo-600 rounded cursor-pointer" />
+        <span>✍️ 声明原创</span>
+      </label>
+      <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
+        <input type="checkbox" id="open_reward" checked class="w-3.5 h-3.5 text-rose-600 rounded cursor-pointer" />
+        <span>💰 开启赞赏</span>
+      </label>
+      <label class="inline-flex items-center gap-1.5 text-xs text-slate-700 cursor-pointer select-none">
         <input type="checkbox" id="notify_me" class="w-3.5 h-3.5 text-amber-600 rounded cursor-pointer" />
         <span>📲 完成后微信通知</span>
         <span class="text-[11px] text-slate-400 font-normal">(需配置企业微信群机器人)</span>
@@ -504,7 +512,9 @@ button { line-height: 1.2; }
       </div>
       <div class="hint">已有公众号列表：</div>
       <div id="acct-list" class="space-y-2 max-h-56 overflow-auto"></div>
-      <div class="hint">提示：API 发布可直接发到任意已添加的号（免扫码，但非本机登录号不带原创/赞赏）；不勾 API 的扫码发布只能发到本机登录的那个号。</div>
+      <div class="hint">提示：API 发布可直接发到任意已添加的号（免扫码）。发到「本机 playwright 登录的那个号」且勾了原创/赞赏时，
+        程序会自动改走编辑器 UI 存草稿→免扫码提交（带原创+赞赏）；发到非本机登录号时微信限制无法带这两项（会在任务日志里告警）。
+        不勾 API 的扫码发布只能发到本机登录的那个号，原创/赞赏直接生效。</div>
     </div>
   </div>
 </div>
@@ -1752,10 +1762,17 @@ $('#run-form').addEventListener('submit', async (e) => {
     api_key: (saved.provider||'deepseek') === 'deepseek' ? '' : (saved.api_key||''),
     base_url: saved.base_url||'', model: saved.model||'',
     use_api: $('#use_api').checked,
+    // 原创/赞赏：微信官方 API 做不到，只有实际走 playwright 编辑器 UI 才生效
+    // （扫码模式本来就走 UI；API 模式仅发布到「本机登录号」时后端自动改走 UI 存草稿两段式）
+    original: $('#declare_original').checked,
+    reward: $('#open_reward').checked,
     notify: $('#notify_me').checked,
     account_id, product_id,
   };
-  saveStored({ use_api: $('#use_api').checked, notify_me: $('#notify_me').checked, account_id, product_id });
+  saveStored({ use_api: $('#use_api').checked, notify_me: $('#notify_me').checked,
+               declare_original: $('#declare_original').checked,
+               open_reward: $('#open_reward').checked,
+               account_id, product_id });
   setRunBtnRunning();
   $('#req-msg').textContent = '提交中…';
   try {
@@ -2369,6 +2386,12 @@ loadProviders();
 initPresets();
 refreshProviderTag(loadStored().provider || 'deepseek');
 $('#use_api').checked = !!loadStored().use_api;
+// 原创/赞赏：新键，没存过就保持 HTML 默认（勾选）；存过则用存过的值（不误伤老数据）
+(function initOrigPref(){
+  const st = loadStored();
+  if (typeof st.declare_original === 'boolean') $('#declare_original').checked = st.declare_original;
+  if (typeof st.open_reward === 'boolean') $('#open_reward').checked = st.open_reward;
+})();
 // 「📲 完成后微信通知」默认【勾选】。
 // ⚠️ 2026-10-15：旧版本默认未勾选，而 saveStored 是"合并写入"，所以老浏览器里已经躺着
 //    notify_me:false —— 那个 false 不代表用户意图（只是旧默认值被存下来了），

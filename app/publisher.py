@@ -70,13 +70,16 @@ def pick_random_cover() -> Optional[Path]:
 
 def publish_one(title: str, body_md_path: Path, author: str,
                 cover_path: Path, qrcode_path: Path, log_path: Path,
-                publish_id_path: Path, save_draft_only: bool = False) -> Dict:
+                publish_id_path: Path, save_draft_only: bool = False,
+                original: bool = True, reward: bool = True) -> Dict:
     """
     调 Node 子进程走完一篇发布流程
     返回 {"ok": bool, "publish_id": str|None, "log": str}
 
     save_draft_only=True：只走"填字段+勾原创+勾赞赏+保存草稿"，不点发表/不弹码。
         返回 {"ok": True, "saved": True, "publish_id": "SAVED"}；调用方需再用 wechat_api 发布。
+    original / reward：是否声明原创 / 开启赞赏（默认开启；仅 save_draft_only 或扫码流程生效，
+        纯 API draft/add 路径微信不支持这两项，需走本 playwright 流程才生效）。
     """
     # 选 node 路径（可移植：环境变量 > PATH > WorkBuddy 托管版本 > 系统安装）
     node_exe = _pick_node()
@@ -96,6 +99,9 @@ def publish_one(title: str, body_md_path: Path, author: str,
     ]
     if save_draft_only:
         cmd += ["--save-draft-only", "true"]
+    # 原创/赞赏：是否勾选（默认勾选）；微信纯 API 不支持，只有走本 playwright UI 流程才生效
+    cmd += ["--original", "true" if original else "false",
+            "--reward", "true" if reward else "false"]
     env = os.environ.copy()
     # playwright-core 可能装在用户目录 node_modules 或项目内，两者都放进 NODE_PATH（可移植）
     env["NODE_PATH"] = _pick_node_path()

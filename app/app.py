@@ -492,31 +492,75 @@ def _run_job(job_id: str):
             if use_api:
                 # ---------- API 全自动发布（切换到所选公众号） ----------
                 mid = ""
+                _ui_ok = False   # 本篇是否已走「UI 存带原创/赞赏草稿」两段式成功
                 try:
                     if target_appid and target_secret:
                         wechat_api.set_account(target_appid, target_secret)
                         job["log"].append(f"  第 {seq+1} 篇：切换到公众号 appid={target_appid[:8]}…")
-                    # 统一走「纯 API」富排版发布（任何账号都适用）：draft/add(富HTML) → freepublish/submit
-                    # 卡片排版：复刻 md2card「公众号模式」管线（5 套公众号专用样式，CSS 内联，
-                    # 微信白名单兼容）；自动发布时在 4 个主题里随机选（不含日本杂志）；失败降级旧版
-                    job["log"].append(f"  第 {seq+1} 篇：生成卡片排版 HTML（随机主题）…")
-                    body_html, _tmid, _tmname = wxcard.render_md_with_theme_safe(md_path.read_text(encoding="utf-8"))
-                    job["log"].append(f"  第 {seq+1} 篇：排版主题「{_tmname}」")
-                    # 主题名落 job + DB：手动发布完成通知要显示「（字节范）」，与每日汇总保持一致；
-                    # 落库还能让「手动发的文章」在当天定时汇总里也带上主题（汇总优先读库）。
-                    job["articles"][seq]["theme"] = _tmname
-                    article.theme = _tmname
-                    db.commit()
-                    # 存草稿（封面裁剪失败 53402 → 换封面立即重试）
-                    mid, _cover_note = _add_draft_with_cover_retry(
-                        title=article.title, body_html=body_html, author=job["author"],
-                        digest=(article.body_md or "")[:100])
-                    if _cover_note:
-                        job["log"].append(f"  {_cover_note}")
-                    job["log"].append(f"  第 {seq+1} 篇：草稿已建 media_id={mid[:16]}… 提交发布…")
-                    # fast_fail：命中 53501 立即失败（实测限流恢复需 ~30 分钟，篇内长退避无意义且拖时间）
-                    pub = wechat_api.publish_draft(mid, fast_fail=True)
-                    pid = str(pub.get("publish_id") or "")
+                    # 原创/赞赏只能由微信编辑器 UI(playwright) 勾选，官方 draft/add 不支持。
+                    # 若发布的就是「本机 playwright 登录号」且用户要原创/赞赏 → 走 UI 存草稿两段式：
+                    #   playwright 填字段+封面+勾原创/赞赏 存草稿(save_draft_only)
+                    #   → find_draft_media_id_by_title → freepublish/submit（免扫码、不占群发额度）
+                    _publish_appid = target_appid or os.getenv("WX_APPID", "")
+                    _want_original = bool(job.get("original", True))
+                    _want_reward = bool(job.get("reward", True))
+                    _need_ui = _ui_draft_for_original(
+                        LOGIN_APPID, _publish_appid, _want_original, _want_reward)
+                    if _need_ui:
+                        try:
+                            _ui_cover = wx.pick_random_cover()
+                            _ui_res = wx.publish_one(
+                                title=article.title,
+                                body_md_path=md_path,
+                                author=job["author"],
+                                cover_path=_ui_cover,
+                                qrcode_path=wx.get_current_qrcode_path(job_id, seq),
+                                log_path=LOG_DIR / f"{job_id}_{seq}_ui.log",
+                                publish_id_path=DATA_DIR / f"{job_id}_{seq}_ui.pid",
+                                save_draft_only=True,
+                                original=_want_original,
+                                reward=_want_reward,
+                            )
+                            if not (_ui_res.get("ok") and _ui_res.get("saved")):
+                                raise RuntimeError("playwright 存草稿失败："
+                                                   + (str(_ui_res.get("log"))[:160] or "无日志"))
+                            mid = wechat_api.find_draft_media_id_by_title(article.title)
+                            if not mid:
+                                raise RuntimeError("按标题找不到草稿 media_id（微信草稿索引延迟）")
+                            job["log"].append(f"  第 {seq+1} 篇：UI 草稿已存（带原创/赞赏）"
+                                              f"media_id={mid[:16]}… 提交发布…")
+                            pub = wechat_api.publish_draft(mid, fast_fail=True)
+                            pid = str(pub.get("publish_id") or "")
+                            _ui_ok = True
+                        except Exception as e:
+                            mid = ""
+                            job["log"].append(f"  ⚠️ 第 {seq+1} 篇：UI 存原创/赞赏草稿失败"
+                                              f"（{str(e)[:160]}），降级纯 API（不带原创/赞赏）")
+                    if not _ui_ok:
+                        # ---------- 纯 API 富排版发布（任何账号都适用，但不带原创/赞赏） ----------
+                        if (_want_original or _want_reward) and not _need_ui:
+                            job["log"].append("  ⚠️ 非本机登录号走纯 API：微信限制无法带原创/赞赏"
+                                              "（需原创/赞赏请改用扫码模式，或发到本机登录号）")
+                        # 卡片排版：复刻 md2card「公众号模式」管线（5 套公众号专用样式，CSS 内联，
+                        # 微信白名单兼容）；自动发布时在 4 个主题里随机选（不含日本杂志）；失败降级旧版
+                        job["log"].append(f"  第 {seq+1} 篇：生成卡片排版 HTML（随机主题）…")
+                        body_html, _tmid, _tmname = wxcard.render_md_with_theme_safe(md_path.read_text(encoding="utf-8"))
+                        job["log"].append(f"  第 {seq+1} 篇：排版主题「{_tmname}」")
+                        # 主题名落 job + DB：手动发布完成通知要显示「（字节范）」，与每日汇总保持一致；
+                        # 落库还能让「手动发的文章」在当天定时汇总里也带上主题（汇总优先读库）。
+                        job["articles"][seq]["theme"] = _tmname
+                        article.theme = _tmname
+                        db.commit()
+                        # 存草稿（封面裁剪失败 53402 → 换封面立即重试）
+                        mid, _cover_note = _add_draft_with_cover_retry(
+                            title=article.title, body_html=body_html, author=job["author"],
+                            digest=(article.body_md or "")[:100])
+                        if _cover_note:
+                            job["log"].append(f"  {_cover_note}")
+                        job["log"].append(f"  第 {seq+1} 篇：草稿已建 media_id={mid[:16]}… 提交发布…")
+                        # fast_fail：命中 53501 立即失败（实测限流恢复需 ~30 分钟，篇内长退避无意义且拖时间）
+                        pub = wechat_api.publish_draft(mid, fast_fail=True)
+                        pid = str(pub.get("publish_id") or "")
                     # 链接不在发布时逐篇查（freepublish/get 日配额极小，逐篇轮询会 45009 耗尽配额）；
                     # 统一在任务结束后用一次 batchget 批量回填（见 _backfill_urls）
                     url = ""
@@ -526,7 +570,13 @@ def _run_job(job_id: str):
                     if url:
                         job["articles"][seq]["url"] = url
                     job["articles"][seq].pop("qr_url", None)
+                    _orig_tag = ""
+                    if _ui_ok:
+                        _orig_tag = "".join(["原创" if _want_original else "",
+                                             "+赞赏" if (_want_original and _want_reward) else
+                                             ("赞赏" if _want_reward else "")])
                     job["log"].append(f"✅ 第 {seq+1} 篇发布成功到 {job.get('account_name','该号')} (publish_id={pid})"
+                                      + (f"（{_orig_tag}）" if _orig_tag else "")
                                       + (f"\n   链接: {url}" if url else ""))
                 except Exception as e:
                     logger.exception("api publish error")
@@ -557,6 +607,9 @@ def _run_job(job_id: str):
                     qrcode_path=qr_path,
                     log_path=log_path,
                     publish_id_path=DATA_DIR / f"{job_id}_{seq}.pid",
+                    # 扫码模式本来就走 playwright UI → 原创/赞赏开关直接生效
+                    original=bool(job.get("original", True)),
+                    reward=bool(job.get("reward", True)),
                 )
 
                 if result["ok"]:
@@ -1115,6 +1168,13 @@ class RunRequest(BaseModel):
     extra_hint: str = ""
     # 发布方式：use_api=True → 官方 API 全自动发布；False → 扫码发布
     use_api: bool = False
+    # 原创/赞赏（默认都开）：仅当实际采用 playwright UI 流程时才生效
+    #   · 扫码模式(use_api=False)：本来就走 UI → 生效
+    #   · API 模式(use_api=True)：仅发布目标为「本机 playwright 登录号」时，
+    #     程序会自动改走 UI 存草稿两段式 → 生效；发到别的号则微信限制无法带（会告警）
+    #   微信官方 draft/add 不支持这两项，这是平台硬限制。
+    original: bool = True
+    reward: bool = True
     # 多产品/多公众号/作者（新）
     account_id: int = 0            # 目标公众号 Account.id；0=用默认/硬编码
     product_id: int = 0            # 所选产品 Product.id；0=用 brand 兜底
@@ -2051,6 +2111,10 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     job["allow_env_key"] = bool(llm_cfg["using_shared"])   # 未获授权 → 不许回落到服务端 .env 的 Key
     job["key_source"] = llm_cfg["key_source"]
     job["use_api"] = bool(req.use_api)
+    # 原创/赞赏（默认都开）。仅在实际采用 playwright UI 流程时才生效：
+    # 扫码模式本来就走 UI；API 模式仅发布目标为「本机 playwright 登录号」时程序自动改走 UI 两段式。
+    job["original"] = bool(req.original)
+    job["reward"] = bool(req.reward)
     job["product_name"] = product_name
     job["product_intro"] = product_intro
     job["product_style"] = product_style
@@ -2659,6 +2723,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             "allow_env_key": bool(llm_cfg["using_shared"]),   # 未获授权 → 不许回落到服务端 .env 的 Key
             "key_source": llm_cfg["key_source"],
             "use_api": True,
+            # 定时任务默认带原创+赞赏（API 模式且发布到本机登录号时，自动改走 UI 存草稿两段式）
+            "original": True, "reward": True,
             "product_name": product.name if product else "",
             "product_intro": product.intro if product else "",
             "product_style": (product.style or "") if product else "",
@@ -2905,6 +2971,28 @@ def _fetch_urls_with_retry(publish_ids, tries: int = 5, wait: float = 6.0) -> di
         logger.warning("仍有 %d/%d 篇未取到链接（微信收录延迟，稍后可在网页刷新链接）",
                        len(want) - len(got), len(want))
     return got
+
+
+def _ui_draft_for_original(login_appid: str, publishing_appid: str,
+                           want_original: bool, want_reward: bool) -> bool:
+    """是否应改用 playwright「存带原创/赞赏的草稿」两段式来发布。
+
+    ⚠️ 微信官方 API(draft/add) 不支持设原创/赞赏，这两项**只能**由微信编辑器 UI
+       （playwright 自动化）勾选。所以自动化发布想要带上原创/赞赏，必须把「建草稿」
+       这一步交给 playwright：填字段+封面+勾原创/赞赏 → 存草稿(save_draft_only)
+       → find_draft_media_id_by_title → freepublish/submit（免扫码）。
+
+    仅当同时满足以下三点才值得走 UI 流程（否则仍走纯 API，更快也更省资源）：
+      1. 用户确实要原创或赞赏（两者都不要 → 没必要开浏览器）；
+      2. 已配置 WX_LOGIN_APPID/WX_APPID（否则没有登录号，无法进编辑器）；
+      3. 本次发布的目标账号 == 本机 playwright 登录号（发到别的号 → 编辑器里没有该号，
+         草稿会存到登录号下，纯 API 才是唯一可行路径）。
+    """
+    if not (want_original or want_reward):
+        return False
+    if not (login_appid or "").strip():
+        return False
+    return (publishing_appid or "").strip() == (login_appid or "").strip()
 
 
 def _build_today_summary_items() -> list:
