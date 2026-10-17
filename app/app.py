@@ -3109,7 +3109,11 @@ def _build_today_summary_items() -> list:
     utc_start = bj.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     db = SessionLocal()
     try:
-        rows = (db.query(Article).filter(Article.created_at >= utc_start, Article.status == "published")
+        # ⚠️ 只统计自动发布(auto_published==1)：手动发布(auto_published==0)走各自的「完成后通知」，
+        # 不计入这条「每日汇总」——否则手动测试一发，就会触发/改写自动发布的每日汇总。
+        rows = (db.query(Article).filter(Article.created_at >= utc_start,
+                                        Article.status == "published",
+                                        Article.auto_published == 1)
                 .order_by(Article.id).all())
         items = [{"title": r.title or r.topic or "", "topic": r.topic or "",
                   "publish_id": str(r.publish_id or ""), "status": "published",
@@ -3167,8 +3171,11 @@ def _real_pending_count() -> int:
         utc_start = bj.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
         db = SessionLocal()
         try:
+            # ⚠️ 只统计自动发布(auto_published==1)：与 _build_today_summary_items 口径一致，
+            # 避免手动发布把 pub_n 抬高、把自动剩余算成 0 而误触「全部完成」。
             pub_n = db.query(Article).filter(Article.created_at >= utc_start,
-                                             Article.status == "published").count()
+                                             Article.status == "published",
+                                             Article.auto_published == 1).count()
         finally:
             db.close()
         return max(plan_total - pub_n, 0)
@@ -3251,9 +3258,11 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
     # 微信发表有收录延迟，首条汇总可能链接还没就绪 → 标记 links_ok=False，
     # 等链接补全后由下面的「自愈」逻辑再补发一次带链接的汇总（避免永久无链接）。
     links_ok = bool(items) and all((it.get("url") or "") for it in items)
-    # 已汇总过的"今天文章集合"签名（按 publish_id）；集合变了（又有新文章发布）才重发，
-    # 既保证「每次发布后都能收到今日汇总」（用户预期），又避免调度循环每 20s 刷屏。
+    # 已汇总过的"今天自动发布集合"签名（按 publish_id）。⚠️ 2026-10-17 改：
+    # 每日汇总只在「全部完成」发一条，绝不逐篇重发——只在「新的完成(集合变大且已发完)」
+    # 或「链接自愈」或「缺 Key 升级」时才重发，中途每发一篇不再触发（用户明确要求）。
     cur_sig = ",".join(sorted({str(it.get("publish_id") or "") for it in items if it.get("publish_id")}))
+    real_remaining = _real_pending_count()
     prev_date = get_setting("daily_summary_date", "")
     prev_sig = get_setting("daily_summary_sig", "")
     prev_kind = get_setting("daily_summary_sent_kind", "")
@@ -3266,14 +3275,18 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
         if not (not prev_links_ok and links_ok):
             return False
     if prev_date == today and not force:
-        # 今天已发过：仅当以下情况才重发：
-        #   · 上次只是缺 Key 提示、本次有了真文章（修复 Key 后补跑）；
-        #   · 文章集合变了（又有新文章发布，sig 不同）；
-        #   · 上次链接不全、本次已补全（自愈补发带链接汇总，避免永久无链接）。
-        if not ((prev_kind == "keyfail" and has_items) or (prev_sig != cur_sig)
-                or (not prev_links_ok and links_ok)):
+        # 今天已发过「正式汇总」：仅在以下情况才重发（核心是「全部完成」只发一条，不逐篇刷屏）：
+        #   · 上次只是缺 Key 提示(keyfail)、本次有了真文章（修复 Key 后补跑）；
+        #   · 上次链接不全、本次已补全 → 自愈补发一次带链接汇总；
+        #   · 出现「新的全部完成」(real_remaining==0 且文章集合变了) —— 如上午跑完一批、之后
+        #     又手动补跑集齐更多篇，作为新的完成再发一条；同一批反复调用不再重发。
+        resend = bool(prev_kind == "keyfail" and has_items)
+        if not resend and (not prev_links_ok and links_ok):
+            resend = True
+        if not resend and real_remaining == 0 and prev_sig != cur_sig:
+            resend = True
+        if not resend:
             return False
-    real_remaining = _real_pending_count()
     if real_remaining > 0 and not force:
         batch_running = _batch_lock.locked()
         if batch_running and datetime.now().hour < 23:
@@ -3283,7 +3296,11 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
                             real_remaining)
                 _last_summary_pending_log = real_remaining
             return False
-        # 无批次在跑 / 已到深夜 → 发「今日还剩 N 篇」（剩余的很可能是陈旧或已失败，通知用户）
+        if datetime.now().hour < 23:
+            # 白天、无批次在跑、但仍有剩余 → 不发（等发完→「全部完成」或深夜「还剩 N 篇」收尾），
+            # 避免白天每批结束都刷一条「还剩 N 篇」（用户要求只在全部完成后通知）。
+            return False
+        # 已到深夜(>=23) 且无批次 → 发「今日还剩 N 篇」收尾（告知当天真实剩余，不遗漏失败）
     _last_summary_pending_log = -1
     # —— 组装 head / tail ——
     if has_items:
