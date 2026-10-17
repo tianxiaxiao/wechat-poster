@@ -251,6 +251,12 @@ def fetch_today_published(limit: int = 40) -> list:
     while len(out) < limit and offset < 60:
         page = min(20, limit - len(out))
         d = _api("freepublish/batchget", {"offset": offset, "count": page, "no_content": 1})
+        code = int(d.get("errcode") or 0)
+        if code:
+            # 必须抛出而不是静默返回空：45009「日配额耗尽」若被当成"今天 0 篇"，
+            # 会让跨设备防重误判、每日汇总拿不到链接却毫无提示（2026-10-17 实测踩到）。
+            # 抛出后 _today_published_count() 返回 -1，调用方按"查询失败"跳过防重，语义正确。
+            raise RuntimeError(f"freepublish/batchget 失败: errcode={code} errmsg={d.get('errmsg')}")
         items = d.get("item") or []
         if not items:
             break
@@ -293,6 +299,12 @@ def fetch_recent_urls(limit: int = 40) -> dict:
                      {"offset": offset, "count": page, "no_content": 0})
         except Exception as e:  # noqa: BLE001
             log.warning("批量取文章链接失败(网络)：%s", str(e)[:100])
+            break
+        code = int(d.get("errcode") or 0)
+        if code:
+            # 45009「日配额耗尽」最常见：不告警的话表现为"每日汇总全部没有链接"，查不到原因
+            log.warning("批量取文章链接失败：errcode=%s errmsg=%s（45009=微信接口日配额耗尽，"
+                        "当天链接需等配额恢复或改用 fetch_publish_url 逐篇直取）", code, d.get("errmsg"))
             break
         items = d.get("item") or []
         if not items:

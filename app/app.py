@@ -2507,6 +2507,84 @@ def _topic_names_for_product(topic_rows, product_id: int) -> list:
     return [t.name for t in topic_rows if (t.product_id or 0) in (0, pid)]
 
 
+def _mark_schedule_ran(user_id: int):
+    """标记该用户今日定时已触发。
+
+    ⚠️ 2026-10-17 修复：原来在「拿到批次锁后立刻」写入，于是批次在任何早退点退出
+    （无可用主题 / 无待发 / 异常中断）都会**永久占掉当天名额**——调度器看到
+    schedule_last_run_date == 今天 就整天不再触发，表面症状正是「9:30 定时没执行」。
+    现在只在确实建起发布任务时才写。"""
+    if not user_id:
+        return
+    try:
+        _db = SessionLocal()
+        try:
+            _us = _db.query(UserSetting).filter(UserSetting.user_id == user_id).first()
+            if _us:
+                _us.schedule_last_run_date = datetime.now().strftime("%Y-%m-%d")
+                _db.commit()
+        finally:
+            _db.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("更新 schedule_last_run_date 失败: %s", e)
+
+
+def _alert_schedule_skip(user_id, title: str, msg: str, key_suffix: str = "") -> None:
+    """定时早退告警：落审计 + 推企微（同一天同一原因最多推一次，避免刷屏）。
+
+    早退过去只写 logger —— 用户完全看不见，只能靠"今天怎么没发文"反推。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        _op = None
+        if user_id:
+            _db = SessionLocal()
+            try:
+                _u = _db.query(User).filter(User.id == user_id).first()
+                if _u:
+                    _op = {"username": _u.username, "role": _u.role}
+            finally:
+                _db.close()
+        audit.audit(None, "schedule.skipped", f"{title}：{msg}",
+                    user=_op or {"username": "系统定时", "role": "system"}, level="warn")
+        key = f"sched_skip_alert_{key_suffix}_{today}"
+        if get_setting(key, "") == "1":
+            return
+        set_setting(key, "1")
+        if notify.configured():
+            who = f"用户：{_op['username']}\n\n" if _op else ""
+            notify.send(f"## ⏭ {title}", who + msg, use_markdown=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("定时早退告警失败: %s", e)
+
+
+def _schedule_needs_retry(us, today: str) -> bool:
+    """当天已标记"跑过"，但实际没发完 → 判定为早退，允许补跑（自愈）。
+
+    判据：今天该号实际发布篇数 < 产品下主题总数（说明还有该发的没发），
+    且当天补跑次数未超上限（2 次），避免在微信故障时空转刷屏。"""
+    try:
+        n = int(get_setting(f"sched_retry_{us.user_id}_{today}", "0") or 0)
+        if n >= 2:
+            return False
+        aids = _parse_aids(us.schedule_account_ids)
+        if not aids and us.default_account_id:
+            aids = [us.default_account_id]
+        db = SessionLocal()
+        try:
+            topic_rows = db.query(Topic).order_by(Topic.id).all()
+            prod_id = int(us.schedule_product_id or 0)
+        finally:
+            db.close()
+        total = len(_topic_names_for_product(topic_rows, prod_id))
+        if total <= 0:
+            return False
+        done_n = _today_published_local_count(int(aids[0]) if aids else 0)
+        return done_n < total
+    except Exception as e:  # noqa: BLE001
+        logger.warning("判断定时是否需要补跑失败: %s", e)
+        return False
+
+
 def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", schedule_product_id=0,
                      mark_daily_run=False, rebuild_plan=False):
     """执行一个批次：把今天的发布计划发到「用户勾选的多个公众号」（多租户）。
@@ -2519,19 +2597,6 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
         logger.info("已有批次在执行，跳过本次触发")
         return
     try:
-        # 多租户每日触发：标记该用户今日已触发，避免调度器重复拉起（仅在真正拿到锁后写）
-        if mark_daily_run and user_id:
-            try:
-                _db = SessionLocal()
-                try:
-                    _us = _db.query(UserSetting).filter(UserSetting.user_id == user_id).first()
-                    if _us:
-                        _us.schedule_last_run_date = datetime.now().strftime("%Y-%m-%d")
-                        _db.commit()
-                finally:
-                    _db.close()
-            except Exception as e:
-                logger.warning("更新 schedule_last_run_date 失败: %s", e)
         _ensure_card_render_ok("每日批次开始")   # 渲染管线自检：不可用立即告警，避免静默降级
         db = SessionLocal()
         try:
@@ -2561,6 +2626,9 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                 target_accounts = [all_accounts[0]]   # legacy 兜底：第一个号
         if not target_accounts:
             logger.warning("定时发布跳过：无任何可发布公众号")
+            _alert_schedule_skip(user_id, "定时发布跳过：没有可发布的公众号",
+                                 "定时任务已触发，但没解析到任何目标公众号（勾选的号可能已被删除）。"
+                                 "请到「定时任务」重新勾选要发的公众号。", key_suffix="noaccount")
             return
         target_ids = [a.id for a in target_accounts]
 
@@ -2643,6 +2711,10 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
         if not topics:
             logger.warning("定时发布跳过：产品「%s」下无可用主题（专属与通用均为空）",
                            (product.name if product else "默认产品"))
+            _alert_schedule_skip(user_id, "定时发布跳过：产品下没有可用主题",
+                                 f"定时用的产品「{product.name if product else '默认产品'}」下既没有专属主题"
+                                 "也没有通用主题，本次一篇未发。请到主题管理给该产品添加主题。",
+                                 key_suffix="notopic")
             return
 
         # ── 再按「定时任务指定的主题」过滤（2026-10-16 新增）──
@@ -2690,10 +2762,21 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             _plan_save(plan)
             # ⚠️ 修复（2026-10-16）：即使早退也要兜底发今日汇总（解耦批次是否跑完）
             _ensure_daily_summary_sent()
+            # ⚠️ 2026-10-17：判定"已全部完成"却一篇没发 = 早退嫌疑，必须让用户看见
+            if _today_published_local_count(target_ids[0] if target_ids else 0) == 0:
+                _alert_schedule_skip(
+                    user_id, "定时任务早退：今天无待发主题",
+                    "定时已触发，但计算出「今天没有待发主题」而一篇未发（该号今天发布数为 0）。\n"
+                    "常见原因：① 定时任务勾选的主题与定时产品不匹配；② 跨设备防重误判。\n"
+                    "处理：检查「定时任务主题」勾选，或点「立即执行」手动补跑。",
+                    key_suffix="nopending")
             return
 
         batch = pending[:BATCH_SIZE]
         batch_no = int(plan.get("batch_done", 0)) + 1
+        # ★ 今日触发标记只在这里写：走到这一步说明"确实有篇要发"，早退路径不会占用当天名额
+        if mark_daily_run and user_id:
+            _mark_schedule_ran(user_id)
         job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
         acc_names = "、".join(a.name for a in target_accounts) or "默认"
         # 操作人（审计用）
@@ -3328,18 +3411,26 @@ def _scheduler_loop():
             # 1) 每日定时起点（含错过后补跑）—— 仅在当前无批次运行时派发，避免线程堆积
             if us_rows and not _batch_lock.locked():
                 for us in us_rows:
+                    retry_reason = ""
                     if us.schedule_last_run_date == today:
-                        continue   # 该用户今天已触发过
+                        # ★ 早退自愈（2026-10-17）：标记已写但今天实际没发完 → 允许补跑（每天最多 2 次）。
+                        #   过去标记一写就永不复查，批次早退后当天再也不会重试。
+                        if not (_schedule_needs_retry(us, today) and now.hour < CATCHUP_UNTIL_HOUR):
+                            continue   # 该用户今天已触发过且确实发完了
+                        _n = int(get_setting(f"sched_retry_{us.user_id}_{today}", "0") or 0) + 1
+                        set_setting(f"sched_retry_{us.user_id}_{today}", str(_n))
+                        retry_reason = f"早退补跑（第 {_n} 次：已标注今天跑过，但还有该发的没发）"
+                        logger.warning("定时早退自愈：用户#%s %s", us.user_id, retry_reason)
                     hh, mm = _parse_hhmm(us.schedule_time)
                     target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
                     if target_dt <= now:
                         in_window = now <= target_dt + timedelta(minutes=3)
                         before_cutoff = now.hour < CATCHUP_UNTIL_HOUR
-                        if in_window or before_cutoff:
+                        if in_window or before_cutoff or retry_reason:
                             aids = _parse_aids(us.schedule_account_ids)
                             if not aids and us.default_account_id:
                                 aids = [us.default_account_id]
-                            reason = "每日定时" if in_window else f"补跑（服务 {now.strftime('%H:%M')} 才运行）"
+                            reason = retry_reason or ("每日定时" if in_window else f"补跑（服务 {now.strftime('%H:%M')} 才运行）")
                             logger.info("触发每日批次（用户#%s）：%s，目标号=%s", us.user_id, reason, aids or "默认")
                             threading.Thread(target=_run_daily_batch,
                                             kwargs=dict(user_id=us.user_id, account_ids=aids,
