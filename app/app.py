@@ -2557,15 +2557,17 @@ def _alert_schedule_skip(user_id, title: str, msg: str, key_suffix: str = "") ->
         logger.warning("定时早退告警失败: %s", e)
 
 
-def _schedule_needs_retry(us, today: str) -> bool:
-    """当天已标记"跑过"，但实际没发完 → 判定为早退，允许补跑（自愈）。
+SCHED_RETRY_INTERVAL_SEC = 15 * 60   # 两次自愈最小间隔（节流，避免批次早退时每 20s 刷屏）
 
-    判据：今天该号实际发布篇数 < 产品下主题总数（说明还有该发的没发），
-    且当天补跑次数未超上限（2 次），避免在微信故障时空转刷屏。"""
+
+def _schedule_needs_retry(us, today: str) -> bool:
+    """当天已标记"跑过"，但实际没发完 → 判定为早退，允许【持续】自愈。
+
+    ⚠️ 2026-10-17 初版用「每天最多重试 2 次」的持久化计数：一旦历史上失败 2 次，
+       即使当天仍有主题没发也永久放弃 → 表现正是「重建 docker 后仍不补发」。
+       现改为：只要【今天没发完】就允许重试，用 15 分钟节流防刷屏，
+       真正发完（done_n >= total）才停止 —— 不再被任何次数永久锁死当天。"""
     try:
-        n = int(get_setting(f"sched_retry_{us.user_id}_{today}", "0") or 0)
-        if n >= 2:
-            return False
         aids = _parse_aids(us.schedule_account_ids)
         if not aids and us.default_account_id:
             aids = [us.default_account_id]
@@ -2579,7 +2581,12 @@ def _schedule_needs_retry(us, today: str) -> bool:
         if total <= 0:
             return False
         done_n = _today_published_local_count(int(aids[0]) if aids else 0)
-        return done_n < total
+        if done_n >= total:
+            return False   # 已发完，自然停（靠这个终结，而非靠重试次数）
+        last_ts = int(get_setting(f"sched_retry_ts_{us.user_id}_{today}", "0") or 0)
+        if time.time() - last_ts < SCHED_RETRY_INTERVAL_SEC:
+            return False   # 节流：距上次自愈不足 15 分钟
+        return True
     except Exception as e:  # noqa: BLE001
         logger.warning("判断定时是否需要补跑失败: %s", e)
         return False
@@ -3413,13 +3420,12 @@ def _scheduler_loop():
                 for us in us_rows:
                     retry_reason = ""
                     if us.schedule_last_run_date == today:
-                        # ★ 早退自愈（2026-10-17）：标记已写但今天实际没发完 → 允许补跑（每天最多 2 次）。
-                        #   过去标记一写就永不复查，批次早退后当天再也不会重试。
+                        # ★ 早退自愈（2026-10-17 修复死锁）：标记已写但今天实际没发完 → 持续补跑。
+                        #   不再受「重试次数」永久锁死：只要没发完且距上次自愈 >15 分钟就在 20 点前重试。
                         if not (_schedule_needs_retry(us, today) and now.hour < CATCHUP_UNTIL_HOUR):
-                            continue   # 该用户今天已触发过且确实发完了
-                        _n = int(get_setting(f"sched_retry_{us.user_id}_{today}", "0") or 0) + 1
-                        set_setting(f"sched_retry_{us.user_id}_{today}", str(_n))
-                        retry_reason = f"早退补跑（第 {_n} 次：已标注今天跑过，但还有该发的没发）"
+                            continue   # 该用户今天已发完 / 节流期内 / 已过 20 点
+                        set_setting(f"sched_retry_ts_{us.user_id}_{today}", str(int(time.time())))
+                        retry_reason = "早退补跑（已标注今天跑过，但还有该发的没发）"
                         logger.warning("定时早退自愈：用户#%s %s", us.user_id, retry_reason)
                     hh, mm = _parse_hhmm(us.schedule_time)
                     target_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)

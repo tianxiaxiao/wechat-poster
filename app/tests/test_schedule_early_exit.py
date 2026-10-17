@@ -19,6 +19,7 @@
 import inspect
 import os
 import sys
+import time
 import tempfile
 from unittest.mock import patch, MagicMock
 
@@ -168,17 +169,20 @@ _us = dbmod.SessionLocal().query(dbmod.UserSetting).filter(
     dbmod.UserSetting.user_id == UID).first()
 
 
-def _needs(done_n, total=2, retry_n=0):
-    with patch.object(app, "get_setting", side_effect=lambda k, d="": str(retry_n)
-                      if k.startswith("sched_retry_") else d), \
-         patch.object(app, "_today_published_local_count", return_value=done_n):
+def _needs(done_n, total=2, ts=0):
+    with patch.object(app, "get_setting", side_effect=lambda k, d="": str(ts)
+                      if k.startswith("sched_retry_ts_") else d), \
+         patch.object(app, "_today_published_local_count", return_value=done_n), \
+         patch.object(app, "_topic_names_for_product", return_value=[None] * total):
         return app._schedule_needs_retry(_us, TODAY)
 
 
 check("⑫ 一篇没发（0 < 2）→ 需要补跑", _needs(0) is True)
 check("⑬ 发了一半（1 < 2）→ 需要补跑", _needs(1) is True)
 check("⑭ 全发完（2 == 2）→ 不需要补跑", _needs(2) is False)
-check("⑮ 已补跑 2 次 → 不再补（防刷屏）", _needs(0, retry_n=2) is False)
+check("⑮ 节流期内（刚补过）→ 不补（防刷屏）", _needs(0, ts=int(time.time())) is False)
+check("⑯ 超过节流期（即使历史多次失败）→ 仍允许补（不再被次数永久锁死）",
+      _needs(0, ts=int(time.time()) - 16 * 60) is True)
 
 # =====================================================================
 # E. 微信 batchget 报错必须如实抛出，不能静默当成「今天 0 篇」
