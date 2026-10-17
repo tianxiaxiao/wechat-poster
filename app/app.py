@@ -710,83 +710,71 @@ def _run_job(job_id: str):
 def _backfill_urls(job_id: str, rounds: int = 3, gap: int = 40):
     """任务发布结束后，回填每篇文章的永久链接（供微信通知里点击查看、网页展示）。
 
-    ⚠️ 为什么不在发布时逐篇抓：freepublish/get 日配额极小——实测 19 篇 × 4 次轮询
-       就把当天配额耗尽（45009 reach max api daily quota limit），导致后续大部分文章
-       抓不到链接（表现为"只有开头几篇带链接"）。
-       改用 freepublish/batchget：1 次调用最多取 20 篇，链接里 mid == publish_id，可精确匹配。
-       刚提交的篇还在异步发布中（未进列表），故按 rounds 轮询等待（默认最多 3 轮）。
+    取链策略（与每日汇总互补、配额效率优先）：
+      1) freepublish/batchget 批量取，按【标题】匹配（1 次最多 20 篇，最省配额；
+         项目实测 URL 内 mid ≠ publish_id，故 by_mid 不可靠，只用 by_title）；
+      2) 仍未取到的，按 publish_id 用 freepublish/get 直取（微信官方接口，最可靠），
+         经 _fetch_urls_with_retry 带缓存+重试，配额可控。
+    rounds/gap 保留仅为兼容 refresh_job_links 调用方。
     """
-    try:
-        for r in range(max(1, rounds)):
-            with jobs_lock:
-                job = jobs.get(job_id)
-                if not job:
-                    return
-                arts = job.get("articles", [])
-                pending = [a for a in arts if a.get("publish_id") and not a.get("url")]
-            if not pending:
-                return
-            m = wechat_api.fetch_recent_urls(40)
-            filled = 0
-            with jobs_lock:
-                for a in arts:
-                    if a.get("url") or not a.get("publish_id"):
-                        continue
-                    pid = str(a.get("publish_id"))
-                    u = m["by_mid"].get(pid) or m["by_title"].get((a.get("title") or "").strip())
-                    if u:
-                        a["url"] = u
-                        filled += 1
-                if filled:
-                    job.setdefault("log", []).append(f"🔗 已回填 {filled} 篇文章链接")
-            # 同步到发布计划（批次路径的 items 也存 url，供补发/复用时带上）
-            if m.get("by_title"):
-                plan = _plan_load()
-                changed = False
-                for it in plan.get("items", []):
-                    if it.get("url"):
-                        continue
-                    u = (m["by_mid"].get(str(it.get("publish_id") or ""))
-                         or m["by_title"].get((it.get("title") or "").strip()))
-                    if u:
-                        it["url"] = u
-                        changed = True
-                if changed:
-                    _plan_save(plan)
-            with jobs_lock:
-                job = jobs.get(job_id)
-                still = [a for a in (job.get("articles", []) if job else [])
-                         if a.get("publish_id") and not a.get("url")]
-            if not still:
-                return
-        if r < max(1, rounds) - 1:
-            time.sleep(gap)   # 等微信异步发布完成后再补一轮
-    except Exception as e:  # noqa: BLE001
-        logger.warning("回填文章链接异常：%s", str(e)[:120])
-    # 兜底：batchget 仍未取到链接的（微信收录延迟/异步发布，或 publish_id 与 URL 内 mid 不匹配导致
-    # by_mid 失配、标题又对不上导致 by_title 失配），改用 freepublish/get 按 publish_id 直取——
-    # 这是微信官方"凭 publish_id 取链接"的接口，不依赖 mid/标题匹配，最可靠；只对极少数缺失篇调用，配额可控。
     try:
         with jobs_lock:
             job = jobs.get(job_id)
-            still = [a for a in (job.get("articles", []) if job else [])
-                     if a.get("publish_id") and not a.get("url")]
-        if still:
-            filled = 0
-            for a in still:
-                pid = str(a.get("publish_id"))
-                u = wechat_api.fetch_publish_url(pid)
-                if u:
-                    with jobs_lock:
+            if not job:
+                return
+            arts = job.get("articles", [])
+            if not [a for a in arts if a.get("publish_id") and not a.get("url")]:
+                return
+        # 1) batchget 按标题匹配（bulk，省配额）
+        url_by_title, url_by_pid = {}, {}
+        try:
+            m = wechat_api.fetch_recent_urls(50)
+            url_by_title = m.get("by_title") or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("批量按标题取链接失败：%s", str(e)[:100])
+        # 2) 剩余按 publish_id 直取（带缓存+重试）
+        with jobs_lock:
+            job = jobs.get(job_id)
+            still_pids = [str(a.get("publish_id")) for a in (job.get("articles", []) if job else [])
+                          if a.get("publish_id") and not a.get("url")]
+        if still_pids:
+            url_by_pid = _fetch_urls_with_retry(still_pids)
+        # 写回 job + 统计
+        filled = 0
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job:
+                for a in job.get("articles", []):
+                    if a.get("url") or not a.get("publish_id"):
+                        continue
+                    t = (a.get("title") or "").strip()
+                    u = url_by_title.get(t) or url_by_pid.get(str(a.get("publish_id")))
+                    if u:
                         a["url"] = u
-                    filled += 1
-            if filled:
-                with jobs_lock:
-                    job = jobs.get(job_id)
-                    if job:
-                        job.setdefault("log", []).append(f"🔗 已按 publish_id 兜底补回 {filled} 篇链接")
+                        filled += 1
+        # 同步到发布计划（items 也存 url，供补发/复用时带上）
+        try:
+            plan = _plan_load()
+            changed = False
+            for it in plan.get("items", []):
+                if it.get("url"):
+                    continue
+                u = url_by_title.get((it.get("title") or "").strip()) \
+                    or url_by_pid.get(str(it.get("publish_id") or ""))
+                if u:
+                    it["url"] = u
+                    changed = True
+            if changed:
+                _plan_save(plan)
+        except Exception:
+            pass
+        if filled:
+            with jobs_lock:
+                job = jobs.get(job_id)
+                if job:
+                    job.setdefault("log", []).append(f"🔗 已回填 {filled} 篇文章链接")
     except Exception as e:  # noqa: BLE001
-        logger.warning("按 publish_id 兜底补链接失败：%s", str(e)[:120])
+        logger.warning("回填文章链接异常：%s", str(e)[:120])
 
 
 def _launch_notify(job_id: str):
@@ -3030,52 +3018,39 @@ _url_cache: dict = {}
 
 
 def _fetch_urls_with_retry(publish_ids, tries: int = 5, wait: float = 6.0) -> dict:
-    """取「publish_id → 文章链接」映射，带重试。
+    """取「publish_id → 文章链接」映射，带重试 + 缓存。
 
     ⚠️ 微信「发表记录」有收录延迟：刚提交成功的文章立刻查不到（2026-10-06 实测，
-    末篇发布 2 秒后就汇总，导致通知里那一篇没有链接）。先重试 batchget（by_mid），
-    仍缺失的再用 freepublish/get 按 publish_id 直取（微信官方接口，不依赖 mid/标题匹配，最可靠）。
-    直取结果进 _url_cache，避免调度循环每 20s 重复消耗 freepublish/get 配额。
+    末篇发布 2 秒后就汇总，导致通知里那一篇没有链接）。故按 publish_id 用
+    freepublish/get 直取（微信官方接口，最可靠），失败重试；结果进 _url_cache，
+    避免调度循环每 20s 重复消耗 freepublish/get 配额。
+
+    ⚠️ 不再先用 freepublish/batchget 的 by_mid 匹配——项目实测「URL 内 mid ≠ publish_id」，
+       by_mid 永远失配，白白消耗 batchget 日配额（45009）；直接 publish_id 直取更稳更省。
     """
     want = {str(x) for x in (publish_ids or []) if x}
     got = {}
     if not want:
         return got
-    # 先用缓存（命中则直接给，不再查接口）
     for pid in want:
         if pid in _url_cache:
             got[pid] = _url_cache[pid]
-
-    def _pull():
-        try:
-            m = wechat_api.fetch_recent_urls(50).get("by_mid") or {}
-            for k, v in m.items():
-                if k in want and k not in got:
-                    got[k] = v
-                    _url_cache[k] = v
-        except Exception as e:
-            logger.warning("取文章链接失败：%s", str(e)[:100])
-
-    _pull()
-    for i in range(max(0, tries - 1)):
-        if len(got) >= len(want):
-            break
-        time.sleep(wait)
-        _pull()
-    # 兜底：batchget 仍未拿到的（mid/标题匹配不上），按 publish_id 直取（带缓存，配额可控）
-    if len(got) < len(want):
-        for pid in want:
-            if pid in got:
-                continue
+    # 按 publish_id 直取（带重试，应对微信收录延迟；fetch_publish_url 内部也处理「发布中」）
+    for pid in want:
+        if pid in got:
+            continue
+        for _ in range(max(1, tries)):
             try:
                 u = wechat_api.fetch_publish_url(pid)
-                if u:
-                    got[pid] = u
-                    _url_cache[pid] = u
             except Exception:
-                pass
+                u = ""
+            if u:
+                got[pid] = u
+                _url_cache[pid] = u
+                break
+            time.sleep(wait)
     if len(got) < len(want):
-        logger.warning("仍有 %d/%d 篇未取到链接（微信收录延迟，稍后可在网页刷新链接）",
+        logger.warning("仍有 %d/%d 篇未取到链接（微信收录延迟或当日接口配额耗尽，稍后可在网页刷新链接）",
                        len(want) - len(got), len(want))
     return got
 
