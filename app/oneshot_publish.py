@@ -129,7 +129,8 @@ def main():
             db = SessionLocal()
             try:
                 db.add(Article(job_id=job_id, seq=seq, topic=topic, title=title,
-                               body_md=body, status="published", publish_id=pid))
+                               body_md=body, status="published", publish_id=pid,
+                               auto_published=0))   # 单篇/手动发布：不计入自动发布当日总数
                 db.commit()
             finally:
                 db.close()

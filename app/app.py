@@ -430,6 +430,7 @@ def _run_job(job_id: str):
                     art = Article(
                         job_id=job_id, seq=seq, topic=tname,
                         title=title, body_md=body, status="generated",
+                        auto_published=job.get("auto_published", 1),
                     )
                     db.add(art)
                 db.commit()
@@ -2119,6 +2120,7 @@ def _start_run_from_req(req: RunRequest, operator: dict = None) -> str:
     job["product_intro"] = product_intro
     job["product_style"] = product_style
     job["source_label"] = "手动"
+    job["auto_published"] = False   # 手动/扫码发布：不计入自动发布当日总数与去重
     job["notify_on_done"] = bool(req.notify)
     # 目标公众号账号（appid/secret/author）
     job["account_appid"] = account.appid if account else ""
@@ -2354,13 +2356,15 @@ def _plan_enqueue_items(new_items: list, gap_min: int = 35) -> int:
 
 
 def _today_done_topics(aid: int = 0) -> set:
-    """今天（北京时间）某公众号已成功发布的主题集合（aid=0 表示全部号），避免多号/续批重复发布。"""
+    """今天（北京时间）某公众号已【自动发布】成功的主题集合（aid=0 表示全部号），避免多号/续批重复发布。
+    ⚠️ 只统计 auto_published==1（自动发布）：手动发布的文章不计入自动发布的去重，避免手动测试占用名额。"""
     bj_now = datetime.utcnow() + timedelta(hours=8)
     bj_day_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0)
     utc_start = bj_day_start - timedelta(hours=8)
     db = SessionLocal()
     try:
-        q = db.query(Article).filter(Article.created_at >= utc_start, Article.status == "published")
+        q = db.query(Article).filter(Article.created_at >= utc_start,
+                                    Article.status == "published", Article.auto_published == 1)
         if aid:
             q = q.filter(Article.account_id == aid)
         rows = q.all()
@@ -2383,14 +2387,18 @@ def _today_published_count() -> int:
         return -1
 
 
-def _today_published_local_count(aid: int = 0) -> int:
-    """本机数据库记录的"今天（北京时间）某公众号已发布"篇数（用于与微信端对比，发现外部发布）。"""
+def _today_published_local_count(aid: int = 0, auto_only: bool = False) -> int:
+    """本机数据库记录的"今天（北京时间）某公众号已发布"篇数。
+    auto_only=True 时只统计自动发布（auto_published==1），用于自动发布计数/去重，
+    使手动发布的文章不挤占自动发布的当日名额。"""
     bj_now = datetime.utcnow() + timedelta(hours=8)
     utc_start = bj_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
     db = SessionLocal()
     try:
         q = db.query(Article).filter(Article.created_at >= utc_start,
                                     Article.status == "published")
+        if auto_only:
+            q = q.filter(Article.auto_published == 1)
         if aid:
             q = q.filter(Article.account_id == aid)
         return q.count()
@@ -2422,15 +2430,20 @@ def _plan_init_today(topics: list, account_ids=None) -> dict:
     else:
         done = _today_done_topics(0)
     # ── 跨设备防重 ───────────────────────────────────────────────
-    wx_n = _today_published_count()
-    local_n = _today_published_local_count(accs[0] if accs else 0)
-    if wx_n > local_n:
-        extra = min(wx_n - local_n, len(topics))
+    # 只防"外部设备的【自动】发布"；本机手动发布的文章不计入，避免手动测试挤占自动名额。
+    wx_n = _today_published_count()              # 微信端今日已发总数（无法区分手动/自动）
+    local_auto_n = _today_published_local_count(accs[0] if accs else 0, auto_only=True)   # 本机自动已发
+    local_total_n = _today_published_local_count(accs[0] if accs else 0)                   # 本机全部已发
+    local_manual_n = max(0, local_total_n - local_auto_n)                                  # 本机手动已发
+    # 外部设备自动已发 ≈ 微信端总数 − 本机(自动+手动)已发；手动的不算"外部自动"
+    external_auto_n = max(0, (wx_n if wx_n >= 0 else 0) - local_auto_n - local_manual_n)
+    if external_auto_n > 0:
+        extra = min(external_auto_n, len(topics))
         if extra > 0:
             skipped = list(topics[:extra])
             done = done | set(skipped)
-            logger.warning("跨设备防重：微信端今日已发 %d 篇、本机记录 %d 篇 → 跳过前 %d 个主题：%s",
-                           wx_n, local_n, extra, "、".join(skipped))
+            logger.warning("跨设备防重：微信端今日已发 %d 篇、本机自动 %d/手动 %d → 外部自动约 %d 篇，跳过前 %d 个主题：%s",
+                           wx_n, local_auto_n, local_manual_n, external_auto_n, extra, "、".join(skipped))
     items = []
     queue = _load_gen_queue()
     if queue:
@@ -2580,7 +2593,7 @@ def _schedule_needs_retry(us, today: str) -> bool:
         total = len(_topic_names_for_product(topic_rows, prod_id))
         if total <= 0:
             return False
-        done_n = _today_published_local_count(int(aids[0]) if aids else 0)
+        done_n = _today_published_local_count(int(aids[0]) if aids else 0, auto_only=True)
         if done_n >= total:
             return False   # 已发完，自然停（靠这个终结，而非靠重试次数）
         last_ts = int(get_setting(f"sched_retry_ts_{us.user_id}_{today}", "0") or 0)
@@ -2679,6 +2692,7 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                     "account_appid": "", "account_secret": "",
                     "account_name": "、".join(a.name for a in target_accounts) or "默认",
                     "source_label": "每日定时", "notify_on_done": False,
+                    "auto_published": True,   # 每日定时自动发布：计入自动发布当日总数与去重
                     "operator": _op or {"username": "系统定时", "role": "system"},
                     "cancel": True, "error": llm_err,
                 }
@@ -2824,6 +2838,7 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             "account_secret": target_accounts[0].secret_enc if target_accounts else "",
             "account_name": acc_names,
             "source_label": "每日定时", "notify_on_done": True,
+            "auto_published": True,   # 每日定时自动发布：计入自动发布当日总数与去重
             "operator": op_user or {"username": "系统定时", "role": "system"},
             "cancel": False,
         }
@@ -2854,7 +2869,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                 try:
                     dbg = SessionLocal()
                     dbg.add(Article(job_id=job_id, seq=-1, topic=it["topic"], title=it["_title"],
-                                   body_md=it["_body"], status="generated"))
+                                   body_md=it["_body"], status="generated",
+                                   auto_published=job.get("auto_published", 1)))
                     dbg.commit(); dbg.close()
                 except Exception:
                     pass
@@ -2922,7 +2938,8 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                         else:
                             db3.add(Article(job_id=job_id, seq=seq, topic=topic, title=title,
                                            body_md=it["_body"], status="published", publish_id=pid,
-                                           account_id=acc.id, theme=it.get("theme", "")))
+                                           account_id=acc.id, theme=it.get("theme", ""),
+                                           auto_published=job.get("auto_published", 1)))
                         db3.commit(); db3.close()
                     except Exception as _e:
                         logger.warning("批次发布结果落库失败: %s", str(_e)[:100])

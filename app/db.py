@@ -97,6 +97,7 @@ class Article(Base):
     account_id = Column(Integer, default=0)  # 发布到的公众号（多租户去重用）
     theme = Column(String(64), default="")   # 卡片排版主题名（如「字节范」「阿里橙」）；扫码发布为空
     error = Column(Text)
+    auto_published = Column(Integer, default=1)  # 1=自动发布(定时/补跑) 0=手动发布(网页点/单篇/扫码)；手动发布不计入自动发布当日总数与去重
     created_at = Column(DateTime, default=_dt.datetime.utcnow)
     updated_at = Column(DateTime, default=_dt.datetime.utcnow, onupdate=_dt.datetime.utcnow)
 
@@ -212,6 +213,11 @@ def _migrate_schema():
             if cols5 and "quality_refine" not in cols5:
                 # 质量精修开关：旧数据默认 1（开），保持与首版一致的行为
                 c.execute(text("ALTER TABLE user_settings ADD COLUMN quality_refine INTEGER DEFAULT 1"))
+                c.commit()
+            if cols2 and "auto_published" not in cols2:
+                # 自动/手动发布标记：旧数据默认 1（自动）—— 历史上发布以自动为主；
+                # 仅「本次迁移后」由手动路径显式写入 0 的文章才不计入自动发布当日总数。
+                c.execute(text("ALTER TABLE articles ADD COLUMN auto_published INTEGER DEFAULT 1"))
                 c.commit()
     except Exception as e:  # noqa: BLE001
         print(f"[migrate] 列迁移失败（可忽略）: {e}")
