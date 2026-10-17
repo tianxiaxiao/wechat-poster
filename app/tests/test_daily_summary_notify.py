@@ -8,7 +8,8 @@
   4. 今天已发过（标记==今日）且未强制 → 不重复发
   5. 强制(force) → 无视标记重发
   6. 有剩余 / 白天 / 批次在跑 / 未强制 → 暂不发（等发完/深夜）
-  7. 有剩余 / 白天 / 无批次在跑 / 未强制 → 发「今日还剩 N 篇」（手动补发完也能白天收到）
+  7. 有剩余 / 白天 / 无批次在跑 / 未强制 → 不发（等「全部完成」或深夜，避免白天刷屏）
+     —— 2026-10-17 更新：用户明确要求"自动发布全部完成才通知"，白天不提前发「还剩 N 篇」——
   8. 有剩余 / 深夜 → 仍发收尾汇总
   9. 有剩余 / 白天 / 批次在跑 / force → 发（强制无视批次）
   —— 加固：完全跳过的日子（0 发布但有人因缺 Key 被硬拦）也要在合并汇总里被看到 ——
@@ -124,9 +125,12 @@ def main():
     sent, send, get, set_, items = _run(marker="", real_remaining=5, hour=18, batch_locked=True)
     check("⑥ 有剩余/白天/批次在跑/未强制 → 暂不发", sent is False and send.call_count == 0)
 
-    # 7. 有剩余 / 白天 / 无批次在跑 / 未强制 → 发「今日还剩 N 篇」（手动补发完也能白天收到）
+    # 7. 有剩余 / 白天 / 无批次在跑 / 未强制 → 不发「还剩 N 篇」
+    #（2026-10-17 更新：用户明确要求「自动发布在全部发布完成后才通知」。
+    #  白天即使无批次在跑、还有剩余，也不发——等「全部完成」或深夜(≥23点)收尾，避免白天刷屏。
+    #  此断言此前仍按旧规则「白天也发还剩N篇」，是过时断言，已随需求更新。）
     sent, send, get, set_, items = _run(marker="", real_remaining=5, hour=18, batch_locked=False)
-    check("⑦ 有剩余/白天/无批次/未强制 → 仍发「还剩 N 篇」", sent is True and send.call_count == 1)
+    check("⑦ 有剩余/白天/无批次/未强制 → 不发（等全部完成或深夜）", sent is False and send.call_count == 0)
 
     # 8. 有剩余 / 深夜 → 仍发收尾汇总（无论批次）
     sent, send, get, set_, items = _run(marker="", real_remaining=5, hour=23, batch_locked=False)

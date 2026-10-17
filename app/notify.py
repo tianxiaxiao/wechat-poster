@@ -147,8 +147,9 @@ def send_job_summary(job: dict) -> dict:
     ok = sum(1 for a in arts if a.get("status") == "published")
     failed = [a for a in arts if a.get("status") != "published"]
     src = job.get("source_label") or ""
-    tag = "⏰ 每日定时" if "定时" in src else ("手动" if src == "手动" else "任务")
-    title = f"## 📰 润致自动发布·{tag}完成：成功 {ok} / 共 {total} 篇"
+    # 2026-10-17：source_label 现在可能是"手动补跑"（/api/daily/run 触发），故用前缀匹配"手动"。
+    tag = "⏰ 每日定时" if "定时" in src else ("🖐 手动补跑" if "手动" in src else "任务")
+    title = f"## 📰 润致发布·{tag}完成：成功 {ok} / 共 {total} 篇"
     lines = []
     for a in arts:
         st = a.get("status")

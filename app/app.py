@@ -2260,6 +2260,9 @@ async def api_daily_run(request: Request):
       真正已发过的篇由 _today_done_topics / 跨设备防重 跳过，不会重复发布。"""
     me = auth.need_role(request, "editor")
     today = datetime.now().strftime("%Y-%m-%d")
+    # 打开「手动补跑」通知模式：本次补跑不发每日汇总，改为全部发完后发一条一次性结果。
+    # 见 _begin_manual_rerun 的注释（必须跨批次保持，续批由调度循环拉起、不经过本端点）。
+    _begin_manual_rerun(me["id"])
     # 用操作人自己的配置跑（不传 account_ids → 由 _run_daily_batch 按其 UserSetting 解析）
     threading.Thread(target=_run_daily_batch,
                     kwargs=dict(user_id=me["id"], reason="手动补跑", rebuild_plan=True), daemon=True).start()
@@ -2302,6 +2305,60 @@ CATCHUP_UNTIL_HOUR = 20   # 定时窗口错过后的补跑截止小时（晚于�
 BATCH_GAP_MIN = 30        # 批间休息（分钟，全成功批用）；失败批固定 60 分钟，封顶 60（用户要求每 30~60 分钟巡检一次）
 PLAN_KEY = "publish_plan"
 _batch_lock = threading.Lock()
+
+
+# ========== 「手动补跑」通知模式（2026-10-17）==========
+# 用户要求：手动补跑（POST /api/daily/run）**不要**发那条「今日已发布 N 篇（全部完成）」的
+# 每日汇总（那是定时自动发布才该有的收尾播报），改为**只发一条一次性结果**（本批发了哪些、成功几篇）。
+#
+# 为什么必须用全局标记、而不是给 _run_daily_batch 加个参数就完事：
+#   一次手动补跑若一次发不完，剩余篇是由【调度循环】以 reason="续批" 再次拉起 _run_daily_batch 的，
+#   那些续批不经过 /api/daily/run，拿不到「本次是手动补跑」这个信息；同时调度循环自己每 20s 还会
+#   调一次 _ensure_daily_summary_sent() 兜底。所以必须跨批次、跨线程记住「现在处于手动补跑模式」。
+#
+# 行为：
+#   · /api/daily/run 触发时 _begin_manual_rerun() 打开标记；
+#   · 标记开启期间 _ensure_daily_summary_sent() 直接不发（每日汇总被彻底压制）；
+#   · 手动补跑的【最后一批】（remaining==0，即真的发完了）改发 send_job_summary(job) 一次性结果，
+#     并写上 daily_summary_* 标记 → 调度循环后续的兜底调用自然跳过，不会再多发一条每日汇总；
+#   · 兜底：标记超过 _MANUAL_RERUN_STALE_SEC 或当天 23 点后自动失效（防止剩余篇一直失败导致
+#     标记永久挂着、把当天每日的汇总也一并压制掉）。
+_MANUAL_RERUN_KEY = "manual_rerun_ts"
+_MANUAL_RERUN_STALE_SEC = 4 * 3600
+_manual_rerun_lock = threading.Lock()
+
+
+def _begin_manual_rerun(user_id: int = 0) -> None:
+    """打开「手动补跑」通知模式（压住每日汇总，改为一次性结果）。"""
+    with _manual_rerun_lock:
+        set_setting(_MANUAL_RERUN_KEY, str(int(time.time())))
+        logger.info("开启手动补跑通知模式（用户#%s）：本次不发每日汇总，改为发一次性结果", user_id)
+
+
+def _manual_rerun_active() -> bool:
+    """手动补跑模式是否仍生效（同一天只认最近一次触发；超时/过 23 点自动失效）。"""
+    with _manual_rerun_lock:
+        raw = get_setting(_MANUAL_RERUN_KEY, "") or ""
+        if not raw:
+            return False
+        try:
+            ts = int(raw)
+        except Exception:
+            return False
+        if not ts:
+            return False
+        now = time.time()
+        if now - ts > _MANUAL_RERUN_STALE_SEC or datetime.now().hour >= 23:
+            logger.info("手动补跑通知模式已失效（触发于 %.1f 小时前 / 现在 %d 点），恢复每日汇总",
+                        (now - ts) / 3600, datetime.now().hour)
+            return False
+        return True
+
+
+def _end_manual_rerun() -> None:
+    """关闭手动补跑通知模式（一次性结果已发出）。"""
+    with _manual_rerun_lock:
+        set_setting(_MANUAL_RERUN_KEY, "")
 
 
 def _plan_load() -> dict:
@@ -2769,6 +2826,19 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             logger.info("今日发布计划已全部完成")
             plan["next_ts"] = 0
             _plan_save(plan)
+            # 手动补跑且已无待发篇（2026-10-17）：关标记 + 发一条简短结果，不发每日汇总。
+            # 否则标记会一直挂着，把当天真正的定时汇总也一并压掉。
+            if _manual_rerun_active():
+                _end_manual_rerun()
+                logger.info("手动补跑：今日已无待发篇，发送无待发提示")
+                try:
+                    if notify.configured():
+                        notify.send("## 📰 手动补跑结果：今日已无待发篇",
+                                    f"{today} 的发布计划已全部完成，本次补跑没有新增文章。",
+                                    use_markdown=True)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("手动补跑无待发提示失败：%s", e)
+                return
             # ⚠️ 修复（2026-10-16）：即使早退也要兜底发今日汇总（解耦批次是否跑完）
             _ensure_daily_summary_sent()
             # ⚠️ 2026-10-17：判定"已全部完成"却一篇没发 = 早退嫌疑，必须让用户看见
@@ -2825,7 +2895,10 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             "account_appid": target_accounts[0].appid if target_accounts else "",
             "account_secret": target_accounts[0].secret_enc if target_accounts else "",
             "account_name": acc_names,
-            "source_label": "每日定时", "notify_on_done": True,
+            # source_label：真实来源。手动补跑（/api/daily/run）时标成"手动补跑"，
+            # 让一次性结果通知的标题正确显示"手动补跑"而不是"每日定时"（notify.send_job_summary 读它）。
+            "source_label": ("手动补跑" if reason == "手动补跑" else "每日定时"),
+            "notify_on_done": True,
             "auto_published": True,   # 每日定时自动发布：计入自动发布当日总数与去重
             "operator": op_user or {"username": "系统定时", "role": "system"},
             "cancel": False,
@@ -2998,8 +3071,24 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
                     notify.send("## ⏳ 触发微信频率限制，本批提前结束",
                                 f"已发 {ok_total} 篇，剩余 {len(remaining)} 篇将在 {nxt_txt} 自动重试（无需处理）。",
                                 use_markdown=True)
-                # 每日汇总（与批次是否跑完解耦）：全部发完/深夜/未发过 → 自动发
-                _ensure_daily_summary_sent()
+                # 手动补跑（2026-10-17）：不发每日汇总，改为「全部发完时发一条一次性结果」。
+                # 中间批（还有剩余、后续由调度循环续批）不发任何通知——避免每批刷屏；
+                # 真正发完的那一批（remaining 为空）才把本轮补跑结果一次性推给用户。
+                if _manual_rerun_active():
+                    if remaining:
+                        logger.info("手动补跑中间批完成 job=%s 成功=%d/%d，剩余 %d 篇待续批，本次不通知",
+                                    job_id, ok_total, len(batch), len(remaining))
+                    else:
+                        try:
+                            notify.send_job_summary(job)
+                            logger.info("手动补跑完成，推送一次性结果：成功 %d/%d 篇",
+                                        ok_total, len(batch))
+                        except Exception as e2:  # noqa: BLE001
+                            logger.warning("手动补跑结果推送失败：%s", e2)
+                        _end_manual_rerun()
+                else:
+                    # 每日汇总（与批次是否跑完解耦）：全部发完/深夜/未发过 → 自动发
+                    _ensure_daily_summary_sent()
         except Exception as e:
             logger.warning("批次通知失败：%s", e)
         logger.info("批次完成 job=%s 成功=%d/%d 剩余=%d", job_id, ok_total, len(batch), len(remaining))
@@ -3221,6 +3310,11 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
        缺 Key 用户名单用 _today_key_failures()（批次硬拦时由 _record_key_failure 写入）。"""
     global _last_summary_pending_log
     if not notify.configured():
+        return False
+    # 手动补跑模式（2026-10-17）：用户手动点补跑时不要每日汇总那条播报，改为补跑结束后
+    # 由 _run_daily_batch 发一条一次性结果（见 _begin_manual_rerun）。
+    if _manual_rerun_active():
+        logger.info("手动补跑模式中，跳过每日汇总（结束时会发一次性结果）")
         return False
     today = datetime.now().strftime("%Y-%m-%d")
     items = _build_today_summary_items()
