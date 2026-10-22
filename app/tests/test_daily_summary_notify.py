@@ -106,12 +106,13 @@ def main():
     # 3. 正常：已发布 + 未发过 + 真实剩余==0（含手动补发已发完）→ 发 + 写标记
     sent, send, get, set_, items = _run(marker="", real_remaining=0)
     check("③ 已发布/未发过/真实剩余0 → 发送「全部完成」", sent is True and send.call_count == 1)
-    check("③ 发送后写入 daily_summary_date / sent_kind=digest / sig / links_ok 标记",
-          set_.call_count == 4
+    check("③ 发送后写入 daily_summary_date / sent_kind=digest / sig / links_ok / 清等待计时 标记",
+          set_.call_count == 5
           and ("daily_summary_date", TODAY) in [c.args for c in set_.call_args_list]
           and ("daily_summary_sent_kind", "digest") in [c.args for c in set_.call_args_list]
           and ("daily_summary_sig", "1") in [c.args for c in set_.call_args_list]
-          and ("daily_summary_links_ok", "1") in [c.args for c in set_.call_args_list])
+          and ("daily_summary_links_ok", "1") in [c.args for c in set_.call_args_list]
+          and ("daily_summary_links_wait_since", "") in [c.args for c in set_.call_args_list])
 
     # 4. 今天已对"同一批文章"发过（date==今日 且 sig 相同）→ 不重复发
     sent, send, get, set_, items = _run(marker=TODAY, sig_val="1", real_remaining=0)
@@ -164,12 +165,12 @@ def main():
     sent, send, get, set_, items = _run(marker=TODAY, sent_kind="keyfail", items=[], key_failures=kf)
     check("⑬ keyfail已发/仍0发布 → 不重复发", sent is False and send.call_count == 0)
 
-    # 16. 自愈：上次发的 digest 链接不全（links_ok=0），本次链接已补全 → 允许再发一次带链接汇总
+    # 16. 2026-10-21 收紧：一天只发一条正式汇总，即便上次链接不全、本次已补全也不再补发
+    #     （避免一天收到多条；正常日子首条会等链接就绪后再发，只有 15 分钟兜底超时才会先发无链接版）。
     sent, send, get, set_, items = _run(marker=TODAY, sent_kind="digest", sig_val="1",
                                         links_ok_val="0", real_remaining=0)
-    check("⑯ 上次链接不全+本次已补全 → 自愈补发带链接汇总",
-          sent is True and send.call_count == 1
-          and ("daily_summary_links_ok", "1") in [c.args for c in set_.call_args_list])
+    check("⑯ 上次链接不全+本次已补全 → 一天一条不再自愈补发（避免一天多条）",
+          sent is False and send.call_count == 0)
 
     # 17. 自愈上限：上次链接不全 + 本次仍无链接 → 不重复发（避免刷屏；等链接就绪再自愈）
     sent, send, get, set_, items = _run(marker=TODAY, sent_kind="digest", sig_val="1",

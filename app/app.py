@@ -2672,6 +2672,11 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
 
         # ── 解析目标公众号列表（多租户：优先用传入 account_ids，否则从用户设置取）──
         target_accounts = []
+        # 默认先绑定 us（读用户设置），供下方 job dict 的 quality_refine 引用。
+        # 关键修复 2026-10-20：自动定时会带 account_ids → 走 if 分支 → else 里的
+        # 「us = get_user_setting」不执行 → 2894 行引用 us 触发 UnboundLocalError 崩整个线程。
+        # 这里在 if/else 之前就绑定，确保 account_ids 非空路径 us 始终有值。
+        us = db_api.get_user_setting(user_id) if user_id else None
         if account_ids:
             target_accounts = [a for a in all_accounts if a.id in set(int(x) for x in account_ids)]
         else:
@@ -2898,7 +2903,10 @@ def _run_daily_batch(user_id=None, account_ids=None, reason="每日定时", sche
             # source_label：真实来源。手动补跑（/api/daily/run）时标成"手动补跑"，
             # 让一次性结果通知的标题正确显示"手动补跑"而不是"每日定时"（notify.send_job_summary 读它）。
             "source_label": ("手动补跑" if reason == "手动补跑" else "每日定时"),
-            "notify_on_done": True,
+            # 通知策略（2026-10-21 修复）：定时/自动/续批批次【不再】发"逐篇/逐批"任务通知，
+            # 全部发布完成后只由全局「每日汇总」发【一条】最终通知（用户明确要求只收最后一条）。
+            # 仅「手动补跑」保留一次性结果通知（中间批不发，见下方收尾分支）。
+            "notify_on_done": (reason == "手动补跑"),
             "auto_published": True,   # 每日定时自动发布：计入自动发布当日总数与去重
             "operator": op_user or {"username": "系统定时", "role": "system"},
             "cancel": False,
@@ -3221,28 +3229,28 @@ _last_summary_pending_log = -1
 
 
 def _real_pending_count() -> int:
-    """今天真实未发完的篇数 = 今天计划总篇数 - 今天已 published 篇数（DB 交叉校验）。
+    """今天真实未发完的篇数 = 今天 DB 里 status 仍为 generated/failed 的自动发布篇数。
 
-    ⚠️ 为什么不能再用 _today_pending_count（计划文件）：手动补发走 _run_job，
-       正常发布成功只改 Article 表、从不更新计划文件的 done 标记 → 计划 remaining 是 stale 值，
-       会导致白天误判"还有剩余"而不发汇总。改用真实发布数后，手动补发完也能立即收到「全部完成」汇总。"""
+    ⚠️ 2026-10-22 修复：旧实现用 publish_plan.date 判断「今天计划总篇数」，但 publish_plan
+       的 date 经常不是当天（如续批/自愈场景下持久化的是旧日期），导致 plan_total=0 →
+       real_remaining 恒为 0 → 发布刚开始（才发 1 篇）就被误判「全部完成」提前发汇总，
+       且「一天一条」规则拦死后续，用户后面发的篇全不在通知里。
+       改用 Article 表真实状态：生成阶段落库 status='generated'，发布阶段 UPDATE 为
+       'published'/'failed'，因此 generated+failed 即「今天还没发完的篇」，不依赖计划文件。
+       只统计自动发布(auto_published==1)，与 _build_today_summary_items 口径一致。"""
     try:
-        plan = _plan_load()
-        today = datetime.now().strftime("%Y-%m-%d")
-        plan_total = len(plan.get("items") or []) if plan.get("date") == today else 0
-        # 今天已 published 篇数（北京时间 0 点口径，与 _build_today_summary_items 一致）
         bj = datetime.utcnow() + timedelta(hours=8)
         utc_start = bj.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
         db = SessionLocal()
         try:
-            # ⚠️ 只统计自动发布(auto_published==1)：与 _build_today_summary_items 口径一致，
-            # 避免手动发布把 pub_n 抬高、把自动剩余算成 0 而误触「全部完成」。
-            pub_n = db.query(Article).filter(Article.created_at >= utc_start,
-                                             Article.status == "published",
-                                             Article.auto_published == 1).count()
+            pend = db.query(Article).filter(
+                Article.created_at >= utc_start,
+                Article.status.in_(["generated", "failed"]),
+                Article.auto_published == 1,
+            ).count()
         finally:
             db.close()
-        return max(plan_total - pub_n, 0)
+        return pend
     except Exception:
         return 0
 
@@ -3327,34 +3335,42 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
     # 微信发表有收录延迟，首条汇总可能链接还没就绪 → 标记 links_ok=False，
     # 等链接补全后由下面的「自愈」逻辑再补发一次带链接的汇总（避免永久无链接）。
     links_ok = bool(items) and all((it.get("url") or "") for it in items)
-    # 已汇总过的"今天自动发布集合"签名（按 publish_id）。⚠️ 2026-10-17 改：
-    # 每日汇总只在「全部完成」发一条，绝不逐篇重发——只在「新的完成(集合变大且已发完)」
-    # 或「链接自愈」或「缺 Key 升级」时才重发，中途每发一篇不再触发（用户明确要求）。
+    # 已汇总过的"今天自动发布集合"签名（按 publish_id）。⚠️ 2026-10-21 改：
+    # 每日汇总一天只发【一条】正式汇总（"全部完成"），绝不因"新完成一批/链接补全"再补发——
+    # 用户明确要求只在发布完成后收到唯一一条最终通知。cur_sig 仅用于"缺Key升级"判断。
     cur_sig = ",".join(sorted({str(it.get("publish_id") or "") for it in items if it.get("publish_id")}))
     real_remaining = _real_pending_count()
+    # 2026-10-19 优化：去掉「无链接首条」重复通知。
+    # 「全部完成」digest 已就绪、但微信文章链接尚未补全（发表有收录延迟）时，白天先不发声，
+    # 由调度循环（每 20s）在链接就绪后再发【唯一这一条】带链接汇总（仍是同一条，不会变两条）；
+    # 避免用户先收到一条点不开的汇总、几分钟后又收到带链接版（两条重复）。
+    # 兜底：若已等待超过 15 分钟仍无链接，或已到深夜(hour>=23)，则发出（避免整晚静默）。
+    if has_items and real_remaining == 0 and not links_ok and not force:
+        now_ts = time.time()
+        wait_since = get_setting("daily_summary_links_wait_since", "")
+        if not wait_since:
+            set_setting("daily_summary_links_wait_since", str(now_ts))
+            wait_since = str(now_ts)
+        waited = now_ts - float(wait_since)
+        if datetime.now().hour < 23 and waited < 15 * 60:
+            logger.info("今日汇总暂不发：文章已发布但微信链接尚未就绪（已等待 %.0f 秒），"
+                        "等链接补全后再发唯一一条带链接汇总（避免无链接重复通知）", waited)
+            return False
+        logger.warning("今日汇总兜底发出：等待链接超时或已深夜仍无链接，links_ok=False（%d 篇）", len(items))
     prev_date = get_setting("daily_summary_date", "")
     prev_sig = get_setting("daily_summary_sig", "")
     prev_kind = get_setting("daily_summary_sent_kind", "")
     prev_links_ok = get_setting("daily_summary_links_ok", "0") == "1"
-    # 今天已对同一批文章发过"正式汇总"：
-    #   · 上次链接已齐全 → 跳过（同一批一天最多一条带链接汇总）；
-    #   · 上次链接不全、本次已补全 → 允许自愈补发一次（否则无链接汇总会永久留存）；
-    #   · 上次链接不全、本次仍不全 → 跳过（避免刷屏；等链接就绪后再自愈）。
-    if prev_date == today and prev_sig == cur_sig and prev_kind == "digest" and not force:
-        if not (not prev_links_ok and links_ok):
-            return False
+    # ★ 2026-10-21 修复：严格「一天最多一条正式汇总」。
+    #   过去会在"又完成一批 / 链接补全"时再发一条 → 用户一天收到多条汇总（含逐篇感）。
+    #   现在：今天只要发过 digest（全部完成汇总），无论之后又完成几篇、链接是否补全，都不再重发，
+    #   确保用户仅在"全部发布完成后"收到【唯一一条】最终通知。
+    #   唯一例外：上次只是"缺 Key 提示(keyfail)"且本次有了真文章 → 升级为正式汇总
+    #   （修复 Key 后补跑，不该只留一条无内容的告警；这是替换而非叠加，一天仍只此一条）。
     if prev_date == today and not force:
-        # 今天已发过「正式汇总」：仅在以下情况才重发（核心是「全部完成」只发一条，不逐篇刷屏）：
-        #   · 上次只是缺 Key 提示(keyfail)、本次有了真文章（修复 Key 后补跑）；
-        #   · 上次链接不全、本次已补全 → 自愈补发一次带链接汇总；
-        #   · 出现「新的全部完成」(real_remaining==0 且文章集合变了) —— 如上午跑完一批、之后
-        #     又手动补跑集齐更多篇，作为新的完成再发一条；同一批反复调用不再重发。
-        resend = bool(prev_kind == "keyfail" and has_items)
-        if not resend and (not prev_links_ok and links_ok):
-            resend = True
-        if not resend and real_remaining == 0 and prev_sig != cur_sig:
-            resend = True
-        if not resend:
+        if prev_kind == "keyfail" and has_items:
+            pass  # 允许从"缺Key提示"升级为正式汇总（替换，不是叠加）
+        else:
             return False
     if real_remaining > 0 and not force:
         batch_running = _batch_lock.locked()
@@ -3390,6 +3406,7 @@ def _ensure_daily_summary_sent(force: bool = False) -> bool:
         set_setting("daily_summary_sent_kind", kind)
         set_setting("daily_summary_sig", cur_sig)
         set_setting("daily_summary_links_ok", "1" if links_ok else "0")
+        set_setting("daily_summary_links_wait_since", "")  # 本次已发，清等待计时
         logger.info("已推送今日汇总（%d 篇，真实剩余 %d，缺Key用户 %d，kind=%s）daily_summary_date=%s force=%s",
                     len(items), real_remaining, len(key_failures), kind, today, force)
         return True

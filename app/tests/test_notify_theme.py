@@ -61,7 +61,7 @@ def main():
     check("字段缺失也不报错、不加后缀", "标题四（" not in txt and "- ✅ 标题四" in txt)
     check("带链接的标题格式正确", "- ✅ [标题一](https://mp.weixin.qq.com/s/abc)（字节范）" in txt,
           next((l for l in lines if "标题一" in l), ""))
-    check("head 仍是「手动完成」口径", "手动完成" in captured.get("head", ""),
+    check("head 为「手动补跑完成」口径", "手动补跑完成" in captured.get("head", ""),
           captured.get("head", ""))
 
     print("\n[2] build_summary_lines（每日汇总路径）主题不受影响")

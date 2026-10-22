@@ -73,7 +73,7 @@ _hour = [10]
 with patch.object(app, "get_setting", _get), \
      patch.object(app, "set_setting", _set), \
      patch.object(app, "_real_pending_count", lambda: _rem[0]), \
-     patch.object(app, "_fetch_urls_with_retry", lambda pids: {}), \
+     patch.object(app, "_fetch_urls_with_retry", lambda pids: {p: ("u_" + p) for p in pids}), \
      patch.object(app.notify, "configured", lambda: True), \
      patch.object(app, "datetime", MagicMock(wraps=datetime)) as _dtmock:
 
